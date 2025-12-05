@@ -6,7 +6,7 @@
 void swe_step_forward(swe_t *swe, int it);
 void swe_step_adjoint(swe_t *swe, int it); 
 
-// 初始化高斯波
+//initial state uses 2D Gaussian function
 void init_gaussian(swe_t *swe, float shift_x_grid, float shift_y_grid, float delta) {
   int i, j;
   float xc = (swe->nx-1) * swe->dx / 2.0 + shift_x_grid * swe->dx;
@@ -24,20 +24,18 @@ void init_gaussian(swe_t *swe, float shift_x_grid, float shift_y_grid, float del
   }
 }
 
+//compute cost function and its gradient g according to state vector x
 float compute_cost(swe_t *swe, float *x, float *g)
 {
   int i, j, k;
   int it;
-  float cost;
+  float cost = 0.0;
   
-  // 1. 设置初始状态
+  //initialize forward state variables to 0
   memcpy(swe->z, x, swe->n * sizeof(float));
   memset(swe->u, 0, swe->n * sizeof(float));
-  memset(swe->v, 0, swe->n * sizeof(float));
-    
-  cost = 0.0;
-  // 2. 积分循环
-  for(it=0; it < swe->nt; it++) {
+  memset(swe->v, 0, swe->n * sizeof(float));    
+  for(it=0; it < swe->nt; it++) {//forward time integration for forward state
     k = 0;
     for(j=0; j<swe->ny; j++){
       for(i=0; i<swe->nx; i++){
@@ -50,16 +48,14 @@ float compute_cost(swe_t *swe, float *x, float *g)
       }
     }
     swe_step_forward(swe, it);
-  }
-
-
-  // 初始化伴随变量为 0 (非常重要)
+  }//end for it
+  
+  //initialize adjoint state variables to 0
   memset(swe->a_z, 0, swe->n * sizeof(float));
   memset(swe->a_u, 0, swe->n * sizeof(float));
   memset(swe->a_v, 0, swe->n * sizeof(float));
   memset(swe->a_H, 0, swe->n * sizeof(float));
-  // 反向时间积分: nt-1 -> 0
-  for(it = swe->nt - 1; it >= 0; it--) {
+  for(it = swe->nt - 1; it >= 0; it--) {//backward time integration for adjoint state
     k = 0;
     for(j=0; j<swe->ny; j++){
       for(i=0; i<swe->nx; i++){
@@ -69,9 +65,9 @@ float compute_cost(swe_t *swe, float *x, float *g)
 	}
       }
     }
-    swe_step_adjoint(swe, it); // 算出 g_0 -> swe->a_z
-  } // End Time Loop
-  memcpy(g, swe->a_z, swe->n*sizeof(float));
+    swe_step_adjoint(swe, it);
+  }//end for it
+  memcpy(g, swe->a_z, swe->n*sizeof(float));//gradient g=a_z
   
   return cost;
 }
@@ -121,21 +117,17 @@ int main(int argc, char *argv[])
   swe->v_temp = malloc(swe->n*sizeof(float));
 
   // ============================================================
-  // Step 1: 生成真实观测 (True Run)
-  // ============================================================
-  printf("--- Phase 1: Generating Truth ---\n");
+  printf("--- Phase 1: generate true observations by running SWE nt steps\n");
   init_gaussian(swe, 0.0, 0.0, 15);
   fp = fopen("z_true_init.bin", "wb");
   fwrite(swe->z, swe->n*sizeof(float), 1, fp);
   fclose(fp);
-
-  //use the truth to extend for nt steps, record observed data
   for(it=0; it < swe->nt; it++) {
     k = 0;
     for(j=0; j<swe->ny; j++){
       for(i=0; i<swe->nx; i++){
 	if (i % swe->stride_x == 0 && j % swe->stride_y == 0) {
-	  swe->z_obs[k + it*swe->np] = swe->z[idx(i,j)];
+	  swe->z_obs[k + it*swe->np] = swe->z[idx(i,j)];//record observed data
 	  k++;
 	}
       }
@@ -144,16 +136,13 @@ int main(int argc, char *argv[])
   }
 
   // ============================================================
-  // Step 2: 初始化 (Guess)
-  // ============================================================
-  printf("--- Phase 2: Initialization ---\n");
-  float *x = malloc(swe->n*sizeof(float)); // 当前最优估计
+  float *x = malloc(swe->n*sizeof(float)); //state vector at current iteration
   float *g = malloc(swe->n*sizeof(float));  // g_k
-  float *d = malloc(swe->n*sizeof(float)); // d_k (搜索方向)
+  float *d = malloc(swe->n*sizeof(float)); // d_k (descent direction)
   float *gold = malloc(swe->n*sizeof(float));  // g_{k-1}
-  float *xx = malloc(swe->n*sizeof(float)); // 用于线搜索的试探点
-  float *gg = malloc(swe->n*sizeof(float)); // 用于线搜索的试探点
-
+  float *xx = malloc(swe->n*sizeof(float)); //test state vector in line search
+  float *gg = malloc(swe->n*sizeof(float)); //gradient vector at test state vector 
+  printf("--- Phase 2: Initialization ---\n");
   if(initopt == 0) {//initialize z with flat field
     for(j = 0; j < swe->ny; j++) {
       for(i = 0; i < swe->nx; i++) {
@@ -171,11 +160,7 @@ int main(int argc, char *argv[])
   fclose(fp);
 
   // ============================================================
-  // Step 3: CG 优化循环 (Conjugate Gradient)
-  // ============================================================
-  printf("--- Phase 3: Polak-Ribiere CG Optimization ---\n");
-
-  // CG 需要的额外变量
+  printf("--- Phase 3: Polak-Ribiere NLCG Optimization ---\n");
   float fx, fxx, fx0;
   float alpha, beta, num, den;
   fx = compute_cost(swe, x, g);
@@ -194,8 +179,7 @@ int main(int argc, char *argv[])
       break; 
     }
 
-    // --- A. 线搜索 (Line Search) ---                                
-    //float alpha = (iter == 0) ? 0.05 : 1.0;
+    //A: line search, 1st iteration alpha=1, take alpha from previous iteration after
     const float c1 = 1e-4; // Armijo (Sufficient Decrease) parameter
     const float c2 = 0.9;  // Curvature (Sufficient Slope) parameter (typically 0.1 to 0.9)
     float slope = 0;
@@ -203,7 +187,7 @@ int main(int argc, char *argv[])
 
     int ls_iter = 0;
     while(ls_iter < 20) { // line search <= 20 times
-      // 1. 试探更新: xx = x + alpha * d
+      // 1. test state vector: xx = x + alpha * d
       for(i=0; i<swe->n; i++) xx[i] = x[i] + alpha * d[i];
         
       // Compute cost f(xx) and gradient gg = grad f(xx)
@@ -214,7 +198,7 @@ int main(int argc, char *argv[])
       // in the main loop anyway. We'll use a new array `gg` for clarity here.
       fxx = compute_cost(swe, xx, gg); // fxx is f(x + alpha*d), gg is grad f(x + alpha*d)
 
-      // 2. Armijo 条件检查 (Sufficient Decrease)
+      // 2. check Armijo condition (Sufficient Decrease)
       if(fxx > fx + c1 * alpha * slope) {
 	// Armijo failed: Step is too large, function value didn't decrease enough.
 	alpha *= 0.5;
@@ -222,7 +206,7 @@ int main(int argc, char *argv[])
 	continue; // Continue to next iteration with smaller alpha
       }
 
-      // 3. Curvature 条件检查 (Sufficient Slope Increase)
+      // 3. check curvature condition (Sufficient Slope Increase)
       float new_slope = 0;
       for(i=0; i<swe->n; i++) new_slope += gg[i]*d[i]; // New slope: grad f(xx) dot d
 
@@ -240,13 +224,12 @@ int main(int argc, char *argv[])
     }
     printf("| Alpha = %.4e | New Cost = %.6e | ls=%d\n", alpha, fxx, ls_iter);
 
-    // --- B. 更新状态 ---                                   
-    // Need to ensure x and g are updated correctly after line search.
+    //B: update state vector x and gradient vector g after line search
     memcpy(x, xx, swe->n * sizeof(float));
     memcpy(g, gg, swe->n * sizeof(float)); 
     fx = fxx;
 
-    // --- C. 准备下一次迭代 (计算 beta), 计算 Polak-Ribiere Beta
+    //C: compute beta in Polak-Ribiere NLCG algorithm
     num = 0;
     den = 0;
     for(i=0; i<swe->n; i++){

@@ -3,8 +3,6 @@
 #define idx(i,j) ((i) + swe->nx*(j))
 
 // ============================================================
-// 1. 前向模型单步积分 (Forward Step)
-// ============================================================
 void swe_step_forward(swe_t *swe, int it) {
   int i, j;
   float dtx = swe->dt / swe->dx;
@@ -69,8 +67,6 @@ void swe_step_forward(swe_t *swe, int it) {
   memcpy(swe->v, swe->v_temp, swe->n * sizeof(float));
 }
 
-// ============================================================
-// 2. 伴随模型主循环 (Adjoint Loop)
 // ============================================================
 void swe_step_adjoint(swe_t *swe, int it)
 {
