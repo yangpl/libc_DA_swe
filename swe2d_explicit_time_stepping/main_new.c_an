@@ -1,0 +1,146 @@
+#include "cstd.h"
+#include "swe.h"
+
+#define G 9.81
+#define idx(i,j) (i + swe->nx*(j))
+
+int main(int argc, char *argv[])
+{
+  swe_t *swe;
+  int i, j, it;
+  double uv, vu, dtx, dty, Fu, Fv;
+  double H_iph, H_imh, H_jph, H_jmh;
+  
+  // 新增：用于存储下一时刻状态的临时指针
+  double *z_new, *u_new, *v_new;
+
+  initargs(argc, argv);  
+  swe = (swe_t *)malloc(sizeof(swe_t));
+
+  if(!getparint("verb", &swe->verb)) swe->verb = 0;
+  if(!getparint("nt", &swe->nt)) swe->nt = 500;
+  if(!getparint("nx", &swe->nx)) swe->nx = 101;
+  if(!getparint("ny", &swe->ny)) swe->ny = 101;
+  if(!getpardouble("dx", &swe->dx)) swe->dx = 10.;
+  if(!getpardouble("dy", &swe->dy)) swe->dy = 10.;
+  if(!getpardouble("dt", &swe->dt)) swe->dt = 0.1;
+  if(!getparint("niter", &swe->niter)) swe->niter = 1000;
+  if(!getpardouble("tol", &swe->tol)) swe->tol = 1e-12;
+  if(!getpardouble("gamma", &swe->gamma)) swe->gamma = 0;
+  if(!getpardouble("f", &swe->f)) swe->f = 0;
+  
+  swe->n = swe->nx*swe->ny;     
+  swe->h = alloc1double(swe->n);
+  swe->z = alloc1double(swe->n);
+  swe->u = alloc1double(swe->n);
+  swe->v = alloc1double(swe->n); 
+  swe->H = alloc1double(swe->n);
+  
+  // 新增：分配临时数组内存
+  z_new = alloc1double(swe->n);
+  u_new = alloc1double(swe->n);
+  v_new = alloc1double(swe->n);
+
+  double xc = (swe->nx-1) * swe->dx / 2.0;
+  double yc = (swe->ny-1) * swe->dy / 2.0;
+  double sigma_x = swe->nx * swe->dx / 10.0;
+  double sigma_y = swe->ny * swe->dy / 10.0;
+  
+  for(j = 0; j < swe->ny; j++) {
+    for(i = 0; i < swe->nx; i++) {
+      double dx = i*swe->dx - xc;
+      double dy = j*swe->dy - yc;
+      swe->z[idx(i,j)] = 0.5 * exp(-(dx*dx)/(2*sigma_x*sigma_x) - (dy*dy)/(2*sigma_y*sigma_y));
+      swe->h[idx(i,j)] = 10.0;
+    }
+  }
+  memset(swe->u, 0, swe->n*sizeof(double));
+  memset(swe->v, 0, swe->n*sizeof(double)); 
+  
+  // 初始化 new 数组，确保边界条件等一致
+  memcpy(z_new, swe->z, swe->n*sizeof(double));
+  memset(u_new, 0, swe->n*sizeof(double));
+  memset(v_new, 0, swe->n*sizeof(double));
+
+  dtx = swe->dt/swe->dx;
+  dty = swe->dt/swe->dy;
+  FILE *fp = fopen("zxy.bin", "w");
+  
+  for(it=0; it < swe->nt; it++) {
+    if(it % 1 == 0) printf("it=%d\n", it); 
+
+    // 1. 更新总水深 H (基于当前时刻 z)
+    for(j=0; j<swe->ny; j++){
+      for(i=0; i<swe->nx; i++){
+        swe->H[idx(i,j)] = swe->h[idx(i,j)] + swe->z[idx(i,j)];
+      }
+    }
+
+    // 2. 计算下一时刻的值 (写入到 _new 数组，读取 swe 数组)
+    for(j=0; j<swe->ny; j++){
+      for(i=0; i<swe->nx; i++){
+        
+        // 默认保留旧值 (处理边界情况)
+        z_new[idx(i,j)] = swe->z[idx(i,j)];
+        u_new[idx(i,j)] = swe->u[idx(i,j)];
+        v_new[idx(i,j)] = swe->v[idx(i,j)];
+
+        // 计算 z_new (连续性方程)
+        if(i-1>=0 && i+1<swe->nx && j-1>=0 && j+1<swe->ny){
+          H_iph = 0.5*(swe->H[idx(i,j)] + swe->H[idx(i+1,j)]);
+          H_imh = 0.5*(swe->H[idx(i,j)] + swe->H[idx(i-1,j)]);
+          double flx_x = dtx*(H_iph*swe->u[idx(i,j)] - H_imh*swe->u[idx(i-1,j)]);
+
+          H_jph = 0.5 * (swe->H[idx(i,j)] + swe->H[idx(i,j+1)]);
+          H_jmh = 0.5 * (swe->H[idx(i,j)] + swe->H[idx(i,j-1)]);
+          double flx_y = dty*(H_jph*swe->v[idx(i,j)] - H_jmh*swe->v[idx(i,j-1)]);
+          
+          z_new[idx(i,j)] = swe->z[idx(i,j)] - flx_x - flx_y;
+        }
+
+        Fu = swe->u[idx(i,j)];
+        Fv = swe->v[idx(i,j)];
+        
+        if(i-1>=0 && i+1<swe->nx && j-1>=0 && j+1<swe->ny){
+	  vu = 0.25*(swe->v[idx(i,j)] + swe->v[idx(i,j-1)] + swe->v[idx(i+1,j)] + swe->v[idx(i+1,j-1)]);
+	  Fu -= swe->dt*(swe->u[idx(i,j)]*(swe->u[idx(i+1,j)]-swe->u[idx(i-1,j)])/(2*swe->dx)
+			 + vu*(swe->u[idx(i,j+1)]-swe->u[idx(i,j-1)])/(2*swe->dy));
+
+	  uv = 0.25*(swe->u[idx(i-1,j)] + swe->u[idx(i,j)] + swe->u[idx(i-1,j+1)] + swe->u[idx(i,j+1)]);
+	  Fv -= swe->dt*(uv*(swe->v[idx(i,j)]-swe->v[idx(i-1,j)])/(2*swe->dx)
+			 + swe->v[idx(i,j)]*(swe->v[idx(i,j+1)]-swe->v[idx(i,j-1)])/(2*swe->dy));
+        }
+
+        // 更新 u (压力梯度使用 swe->z，即上一时刻的 z)
+        if(i+1<swe->nx){ // 保证 z[i+1] 存在
+	  u_new[idx(i,j)] = Fu - G*dtx*(swe->z[idx(i+1,j)] - swe->z[idx(i,j)]) - swe->dt*swe->gamma*swe->u[idx(i,j)] - swe->f*swe->dt*Fv;
+        }
+        
+        // 更新 v
+        if(j+1<swe->ny){ // 保证 z[j+1] 存在
+	  v_new[idx(i,j)] = Fv - G*dty*(swe->z[idx(i,j+1)] - swe->z[idx(i,j)]) - swe->dt*swe->gamma*swe->v[idx(i,j)] + swe->f*swe->dt*Fu;
+        }
+      }
+    }
+
+    // 3. 更新状态：将 _new 复制回 swe (或者使用指针交换)
+    memcpy(swe->z, z_new, swe->n*sizeof(double));
+    memcpy(swe->u, u_new, swe->n*sizeof(double));
+    memcpy(swe->v, v_new, swe->n*sizeof(double));
+
+    fwrite(swe->z, swe->n*sizeof(double), 1, fp);
+  }
+  fclose(fp);
+  
+  free1double(swe->H);
+  free1double(swe->h);
+  free1double(swe->z);
+  free1double(swe->u);
+  free1double(swe->v);
+  
+  free1double(z_new);
+  free1double(u_new);
+  free1double(v_new);
+    
+  return 0;
+}
