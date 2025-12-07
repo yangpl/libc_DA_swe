@@ -199,3 +199,51 @@ void swe_step_adjoint(swe_t *swe, int it)
 
 }
 
+//compute cost function and its gradient g according to state vector x
+float compute_cost(swe_t *swe, float *x, float *g)
+{
+  int i, j, k;
+  int it;
+  float cost = 0.0;
+  
+  //initialize forward state variables to 0
+  memcpy(swe->z, x, swe->n * sizeof(float));
+  memset(swe->u, 0, swe->n * sizeof(float));
+  memset(swe->v, 0, swe->n * sizeof(float));    
+  for(it=0; it < swe->nt; it++) {//forward time integration for forward state
+    k = 0;
+    for(j=0; j<swe->ny; j++){
+      for(i=0; i<swe->nx; i++){
+	if (i % swe->stride_x == 0 && j % swe->stride_y == 0) {
+	  swe->z_cal[k + it*swe->np] = swe->z[idx(i,j)];
+	  swe->z_res[k + it*swe->np] = swe->z_cal[k + it*swe->np] - swe->z_obs[k + it*swe->np];
+	  cost += 0.5*swe->z_res[k + it*swe->np]*swe->z_res[k + it*swe->np];
+	  k++;
+	}
+      }
+    }
+    swe_step_forward(swe, it);
+  }//end for it
+  
+  //initialize adjoint state variables to 0
+  memset(swe->a_z, 0, swe->n * sizeof(float));
+  memset(swe->a_u, 0, swe->n * sizeof(float));
+  memset(swe->a_v, 0, swe->n * sizeof(float));
+  memset(swe->a_H, 0, swe->n * sizeof(float));
+  for(it = swe->nt - 1; it >= 0; it--) {//backward time integration for adjoint state
+    k = 0;
+    for(j=0; j<swe->ny; j++){
+      for(i=0; i<swe->nx; i++){
+	if (i % swe->stride_x == 0 && j % swe->stride_y == 0) {
+	  swe->a_z[idx(i,j)] += swe->z_res[k + it*swe->np];
+	  k++;
+	}
+      }
+    }
+    swe_step_adjoint(swe, it);
+  }//end for it
+  memcpy(g, swe->a_z, swe->n*sizeof(float));//gradient g=a_z
+  
+  return cost;
+}
+
