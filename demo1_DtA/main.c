@@ -47,7 +47,9 @@ int main(int argc, char *argv[])
   if(!getparint("stride_x", &swe->stride_x)) swe->stride_x = 5;
   if(!getparint("stride_y", &swe->stride_y)) swe->stride_y = 5;
   swe->n = swe->nx * swe->ny;
-  swe->np = (swe->nx/swe->stride_x) * (swe->ny/swe->stride_y);
+  // Number of sampled points including boundaries (i=0,j=0 and every stride)
+  swe->np = ((swe->nx - 1) / swe->stride_x + 1) * ((swe->ny - 1) / swe->stride_y + 1);
+  printf("Adjoint mode: swe_step_adjoint\n");
     
   swe->h = malloc(swe->n*sizeof(float));
   swe->H = malloc(swe->n*sizeof(float));
@@ -136,6 +138,11 @@ int main(int argc, char *argv[])
     const float c2 = 0.9;  // Curvature (Sufficient Slope) parameter (typically 0.1 to 0.9)
     float slope = 0;
     for(i=0; i<swe->n; i++) slope += g[i]*d[i]; // Original slope: g[x] dot d
+    if(!isfinite(slope) || slope >= 0.0f) {
+      for(i=0; i<swe->n; i++) d[i] = -g[i];
+      slope = 0.0f;
+      for(i=0; i<swe->n; i++) slope += g[i]*d[i];
+    }
 
     int ls_iter = 0;
     while(ls_iter < 20) { // line search <= 20 times
@@ -149,6 +156,11 @@ int main(int argc, char *argv[])
       // We will temporarily use the 'g' array for the new gradient gg, as 'g' will be overwritten 
       // in the main loop anyway. We'll use a new array `gg` for clarity here.
       fxx = compute_cost(swe, xx, gg); // fxx is f(x + alpha*d), gg is grad f(x + alpha*d)
+      if(!isfinite(fxx)) {
+	alpha *= 0.5;
+	ls_iter++;
+	continue;
+      }
 
       // 2. check Armijo condition (Sufficient Decrease)
       if(fxx > fx + c1 * alpha * slope) {
@@ -161,6 +173,11 @@ int main(int argc, char *argv[])
       // 3. check curvature condition (Sufficient Slope Increase)
       float new_slope = 0;
       for(i=0; i<swe->n; i++) new_slope += gg[i]*d[i]; // New slope: grad f(xx) dot d
+      if(!isfinite(new_slope)) {
+	alpha *= 0.5;
+	ls_iter++;
+	continue;
+      }
 
       if(new_slope >= c2 * slope) {
 	// Curvature satisfied: The slope at the new point is sufficiently less negative (or more positive).

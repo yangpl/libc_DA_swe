@@ -1,5 +1,5 @@
 rm *.bin *.txt *.png
 
-./main
+./main nt=50 niter=30
 
-python3 plot_grad.py
+python3 plot_result.py

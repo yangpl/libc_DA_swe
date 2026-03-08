@@ -13,13 +13,23 @@ BIN = .
 # INC = -I. -I$(FFTW_INC) -I$(NETCDF_INC)
 LIB = -lm -lmpi
 INC = -I.
-SRC = $(wildcard *.c)
-OBJ = $(SRC:.c=.o)
+MAIN_SRC = cstd.c main.c swe.c
+MAIN_OBJ = $(MAIN_SRC:.c=.o)
+GRADCHECK_SRC = gradcheck.c swe.c
+GRADCHECK_OBJ = $(GRADCHECK_SRC:.c=.o)
+ADJCHECK_SRC = adjcheck.c swe.c
+ADJCHECK_OBJ = $(ADJCHECK_SRC:.c=.o)
 
 all: clean main
 
-main:	$(OBJ)
-	$(CC) $(CFLAGS) -o $(BIN)/main $(OBJ) $(LIB)
+main:	$(MAIN_OBJ)
+	$(CC) $(CFLAGS) -o $(BIN)/main $(MAIN_OBJ) $(LIB)
+
+gradcheck: $(GRADCHECK_OBJ)
+	$(CC) $(CFLAGS) -o $(BIN)/gradcheck $(GRADCHECK_OBJ) $(LIB)
+
+adjcheck: $(ADJCHECK_OBJ)
+	$(CC) $(CFLAGS) -o $(BIN)/adjcheck $(ADJCHECK_OBJ) $(LIB)
 
 %.o: %.c 
 	$(CC) $(CFLAGS) -c $^ -o $@ $(INC) $(LIB)
@@ -30,6 +40,4 @@ clean:
 	find . -name "*.bck" -exec rm {} \;
 	find . -name "*~"    -exec rm {} \;
 	find . -name "\#*"   -exec rm {} \;
-	rm -f $(OBJ) main
-
-
+	rm -f $(MAIN_OBJ) $(GRADCHECK_OBJ) $(ADJCHECK_OBJ) main gradcheck adjcheck
