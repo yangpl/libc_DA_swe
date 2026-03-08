@@ -35,16 +35,16 @@ typedef struct {
     float *v_store;
     
     // 观测数据
-  int stride_x, stride_y;
-  int np;//np positions
+    int stride_x, stride_y;
+    int np;//np positions
+    
+    float *z_obs;//observed field z
+    float *z_cal;//calculated field z
+    float *z_res;//residual z_res=z_obs-z_cal
   
-  float *z_obs;//observed field z
-  float *z_cal;//calculated field z
-  float *z_res;//residual z_res=z_obs-z_cal
-
-  float *z_temp;
-  float *u_temp;
-  float *v_temp;
+    float *z_temp;
+    float *u_temp;
+    float *v_temp;
 
     int n; // nx * ny
 } swe_t;

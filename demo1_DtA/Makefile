@@ -4,13 +4,9 @@ CFLAGS = -O3 -g -Wall
 # FFTW_INC =/home/pyang/software_alias/external/gcc/include/fftw # /applis/site/stow/gcc_4.4.6/fftw_3.3.3/include
 # FFTW_LIB =/home/pyang/software_alias/external/gcc/lib64  # /applis/site/stow/gcc_4.4.6/fftw_3.3.3/lib
 
-# NETCDF_INC =/home/pyang/software_alias/external/gcc/include/netcdf # /applis/site/stow/gcc_4.4.6/netcdf_3.3.3/include
-# NETCDF_LIB =/home/pyang/software_alias/external/gcc/lib64  # /applis/site/stow/gcc_4.4.6/netcdf_3.3.3/lib
-
-
 BIN = .
-# LIB = -L$(FFTW_LIB) -lfftw3  -L$(NETCDF_LIB) -lnetcdf -lm -lmpi -fopenmp
-# INC = -I. -I$(FFTW_INC) -I$(NETCDF_INC)
+# LIB = -L$(FFTW_LIB) -lfftw3  -lm -lmpi -fopenmp
+# INC = -I. -I$(FFTW_INC) 
 LIB = -lm -lmpi
 INC = -I.
 MAIN_SRC = cstd.c main.c swe.c
