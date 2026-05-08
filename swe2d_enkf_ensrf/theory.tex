@@ -1,0 +1,1042 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[fontset=none]{ctex} 
+\setCJKmainfont{SimSun}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\hypersetup{colorlinks,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setlength{\headheight}{15pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{二维浅水方程 EnKF/EnSRF 理论说明}
+\fancyhead[C]{libc\_DA\_swe}
+\fancyhead[R]{\thepage}
+
+\title{基于 \texttt{swe2d\_enkf.c} 的二维浅水方程 EnKF/EnSRF 理论说明}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本文按照 \texttt{swe2d\_enkf/swe2d\_enkf.c} 的实际实现，解释该程序所使用的二维浅水方程集合卡尔曼滤波（Ensemble Kalman Filter, EnKF）与集合平方根滤波（Ensemble Square Root Filter, EnSRF）方法。重点不是介绍最一般的集合滤波理论，而是说明这份代码中状态变量、观测算子、样本协方差、卡尔曼增益以及两种分析更新分别对应什么数学对象，以及代码中做了哪些近似和简化。
+\end{abstract}
+
+\section{程序在做什么}
+
+这份代码实现的是一个最基本的“双系统”数据同化实验：
+\begin{enumerate}
+    \item 用同一个浅水方程数值模式推进一个“真值场”；
+    \item 从真值场中抽取带噪声观测；
+    \item 从同一初始集合复制出两套集合，分别用于随机 EnKF 和确定性 EnSRF；
+    \item 在每个同化时刻，用同一批观测分别修正这两套集合；
+    \item 对比两种滤波器的分析均值、RMSE 和集合离散度。
+\end{enumerate}
+
+因此，程序中的核心思想可以概括为
+\[
+\text{共同预测} \;\to\; \text{共同生成观测} \;\to\; \text{EnKF/EnSRF 分别分析} \;\to\; \text{继续预测}.
+\]
+
+\section{前向模式：二维浅水方程}
+
+\subsection{连续方程}
+
+代码的物理变量是
+\[
+h(x,y,t), \qquad hu(x,y,t), \qquad hv(x,y,t),
+\]
+其中 $h$ 是水深，$u,v$ 是速度分量，$hu,hv$ 是两个方向上的动量。
+
+对应的二维浅水方程守恒形式为
+\[
+\frac{\partial \mathbf{q}}{\partial t}
++ \frac{\partial \mathbf{f}(\mathbf{q})}{\partial x}
++ \frac{\partial \mathbf{g}(\mathbf{q})}{\partial y}
+= 0,
+\]
+其中状态向量为
+\[
+\mathbf{q} =
+\begin{pmatrix}
+h \\ hu \\ hv
+\end{pmatrix}.
+\]
+
+在代码中使用的通量是
+\[
+\mathbf{f}(\mathbf{q}) =
+\begin{pmatrix}
+hu \\
+\dfrac{(hu)^2}{h} + \dfrac{1}{2}gh^2 \\
+\dfrac{hu\,hv}{h}
+\end{pmatrix},
+\qquad
+\mathbf{g}(\mathbf{q}) =
+\begin{pmatrix}
+hv \\
+\dfrac{hu\,hv}{h} \\
+\dfrac{(hv)^2}{h} + \dfrac{1}{2}gh^2
+\end{pmatrix}.
+\]
+这正对应代码中的 \texttt{flux\_x()} 和 \texttt{flux\_y()}。
+
+\subsection{空间离散与时间推进}
+
+在空间上，程序使用的是局部 Lax--Friedrichs，也叫 Rusanov 通量。以 $x$ 方向为例，两侧状态分别为 $\mathbf{q}_L,\mathbf{q}_R$ 时，数值通量写成
+\[
+\widehat{\mathbf{f}}_{i+1/2,j}
+= \frac{1}{2}\left[\mathbf{f}(\mathbf{q}_L)+\mathbf{f}(\mathbf{q}_R)\right]
+- \frac{1}{2}s_{\max}\left(\mathbf{q}_R-\mathbf{q}_L\right),
+\]
+其中
+\[
+s_{\max} = \max\left(|u_L|+\sqrt{gh_L},\; |u_R|+\sqrt{gh_R}\right).
+\]
+$y$ 方向同理。
+
+于是一个显式 Euler 更新可以写成
+\[
+\mathbf{q}_{i,j}^{\,n+1}
+= \mathbf{q}_{i,j}^{\,n}
+- \frac{\Delta t}{\Delta x}\left(
+\widehat{\mathbf{f}}_{i+1/2,j}-\widehat{\mathbf{f}}_{i-1/2,j}
+\right)
+- \frac{\Delta t}{\Delta y}\left(
+\widehat{\mathbf{g}}_{i,j+1/2}-\widehat{\mathbf{g}}_{i,j-1/2}
+\right).
+\]
+代码中这一步由 \texttt{euler\_update()} 完成。
+
+在时间上，程序使用两步 RK2：
+\begin{align*}
+\mathbf{q}^{(1)} &= \mathbf{q}^n + \Delta t\, L(\mathbf{q}^n), \\
+\mathbf{q}^{(2)} &= \mathbf{q}^{(1)} + \Delta t\, L(\mathbf{q}^{(1)}), \\
+\mathbf{q}^{n+1} &= \frac{1}{2}\mathbf{q}^{n} + \frac{1}{2}\mathbf{q}^{(2)},
+\end{align*}
+其中 $L(\mathbf{q})$ 表示离散通量散度算子。代码中这一步由 \texttt{step\_rk2()} 完成。
+
+\subsection{CFL 时间步长}
+
+时间步长由 CFL 条件自适应给出：
+\[
+\Delta t
+= \mathrm{CFL}\cdot
+\min\left(
+\frac{\Delta x}{|u|+\sqrt{gh}},
+\frac{\Delta y}{|v|+\sqrt{gh}}
+\right).
+\]
+代码里常数取为
+\[
+\mathrm{CFL}=0.40.
+\]
+
+\section{EnKF 中的状态、观测与集合}
+
+\subsection{状态向量}
+
+虽然代码内部把变量分别存储为 \texttt{h}, \texttt{hu}, \texttt{hv} 三个数组，但从 EnKF 的角度看，每个集合成员都对应一个大的状态向量
+\[
+\mathbf{x} =
+\begin{pmatrix}
+h_1,\dots,h_N,\;
+(hu)_1,\dots,(hu)_N,\;
+(hv)_1,\dots,(hv)_N
+\end{pmatrix}^{\mathsf T},
+\]
+其中 $N=nx \times ny$ 是网格点总数。
+
+因此程序实际同化的是整个三分量状态，而不仅仅是水深。
+
+\subsection{集合初始化}
+
+真值场由一个高斯隆起初始化：
+\[
+h(x,y,0) = 1 + 0.2\exp\left(-\frac{(x-x_0)^2+(y-y_0)^2}{0.02}\right),
+\qquad hu=0,\qquad hv=0.
+\]
+
+每个集合成员都从真值初值出发，再加入高斯随机扰动：
+\begin{align*}
+h^{(e)} &= h^{\mathrm{truth}} + \sigma_{h0}\,\xi_h, \\
+(hu)^{(e)} &= (hu)^{\mathrm{truth}} + \sigma_{m0}\,\xi_{hu}, \\
+(hv)^{(e)} &= (hv)^{\mathrm{truth}} + \sigma_{m0}\,\xi_{hv},
+\end{align*}
+其中 $\xi$ 是标准正态随机变量。代码中取
+\[
+\sigma_{h0}=0.02,\qquad \sigma_{m0}=0.005.
+\]
+
+这一步的意义是：EnKF 不是维护单个状态，而是维护一个随机样本集合，用集合离散地表示概率分布。
+
+\section{观测模型}
+
+\subsection{观测网络}
+
+程序在区域内部构造 $m=16$ 个观测点，近似为一个规则稀疏网格。观测点索引由 \texttt{build\_observation\_network()} 给出。
+
+\subsection{观测算子}
+
+这份代码只观测水深 $h$，不直接观测动量 $hu,hv$。因此观测方程可写为
+\[
+\mathbf{y} = \mathcal{H}(\mathbf{x}) + \boldsymbol{\varepsilon},
+\]
+其中观测算子 $\mathcal{H}$ 的作用只是“从完整状态向量中抽取若干个网格点上的 $h$ 值”。
+
+如果第 $p$ 个观测对应网格点 $k_p$，那么
+\[
+\bigl[\mathcal{H}(\mathbf{x})\bigr]_p = h_{k_p}.
+\]
+
+观测误差取独立同分布高斯噪声：
+\[
+\boldsymbol{\varepsilon}\sim \mathcal{N}(0,R),
+\qquad
+R = \sigma_{\mathrm{obs}}^2 I.
+\]
+代码中
+\[
+\sigma_{\mathrm{obs}} = 0.01.
+\]
+
+因此观测生成公式是
+\[
+y_p = h^{\mathrm{truth}}_{k_p} + \sigma_{\mathrm{obs}}\eta_p,
+\qquad
+\eta_p\sim \mathcal{N}(0,1).
+\]
+这一步由 \texttt{make\_observations()} 完成。
+
+\section{EnKF 预测步}
+
+设第 $e$ 个集合成员在某个同化时刻之前的分析状态为 $\mathbf{x}_{k-1}^{a,(e)}$。经过模式积分后得到预测状态
+\[
+\mathbf{x}_{k}^{f,(e)} = \mathcal{M}\bigl(\mathbf{x}_{k-1}^{a,(e)}\bigr),
+\]
+其中 $\mathcal{M}$ 就是由浅水方程数值模式定义的非线性推进算子。
+
+在这份代码里，每次同化窗口内都推进固定步数 \texttt{assim\_every=20}。因此程序层面写成
+\[
+\mathbf{x}_{k}^{f,(e)} = \mathcal{M}_{20}\bigl(\mathbf{x}_{k-1}^{a,(e)}\bigr).
+\]
+
+随后由预测集合计算集合均值
+\[
+\bar{\mathbf{x}}^f = \frac{1}{N_e}\sum_{e=1}^{N_e}\mathbf{x}^{f,(e)},
+\]
+这里 $N_e$ 是集合成员数，代码中取
+\[
+N_e = 20.
+\]
+
+\section{EnKF 分析步}
+
+\subsection{观测空间样本}
+
+对于每个预测成员，先映射到观测空间：
+\[
+\mathbf{y}^{f,(e)} = \mathcal{H}\bigl(\mathbf{x}^{f,(e)}\bigr).
+\]
+因为这里只观测 $h$，所以 $\mathbf{y}^{f,(e)}$ 就是第 $e$ 个成员在观测点上的水深值。
+
+观测空间均值为
+\[
+\bar{\mathbf{y}}^f = \frac{1}{N_e}\sum_{e=1}^{N_e}\mathbf{y}^{f,(e)}.
+\]
+
+\subsection{样本协方差}
+
+EnKF 的关键是用集合样本协方差近似真实协方差。程序中计算了两个矩阵：
+
+\paragraph{状态与观测之间的互协方差}
+\[
+P_{xy}
+= \frac{1}{N_e-1}
+\sum_{e=1}^{N_e}
+\left(\mathbf{x}^{f,(e)}-\bar{\mathbf{x}}^f\right)
+\left(\mathbf{y}^{f,(e)}-\bar{\mathbf{y}}^f\right)^{\mathsf T}.
+\]
+这个矩阵回答的问题是：“某个状态分量的偏差，和某个观测位置水深的偏差是否相关？”
+
+\paragraph{观测空间协方差}
+\[
+P_{yy}
+= \frac{1}{N_e-1}
+\sum_{e=1}^{N_e}
+\left(\mathbf{y}^{f,(e)}-\bar{\mathbf{y}}^f\right)
+\left(\mathbf{y}^{f,(e)}-\bar{\mathbf{y}}^f\right)^{\mathsf T}.
+\]
+这个矩阵描述预测集合在观测空间中的离散程度。
+
+代码中的 \texttt{Pxy} 和 \texttt{Pyy} 就是这两个样本协方差。
+
+\subsection{卡尔曼增益}
+
+有了样本协方差以后，就构造
+\[
+S = P_{yy} + R,
+\]
+以及卡尔曼增益
+\[
+K = P_{xy}S^{-1}.
+\]
+
+其含义很直观：如果某个状态分量与观测误差之间相关性强，而且观测误差协方差 $R$ 又不大，那么该状态分量就应该被观测更强烈地修正。
+
+代码用 \texttt{invert\_matrix()} 对 $S$ 做直接求逆，然后显式计算 $K$。
+
+\subsection{扰动观测更新}
+
+这份程序使用的是随机 EnKF（stochastic EnKF），也就是对每个成员使用带扰动的观测：
+\[
+\mathbf{y}^{(e)}_{\mathrm{pert}}
+= \mathbf{y} + \boldsymbol{\varepsilon}^{(e)},
+\qquad
+\boldsymbol{\varepsilon}^{(e)} \sim \mathcal{N}(0,R).
+\]
+
+于是每个成员的创新向量为
+\[
+\mathbf{d}^{(e)}
+= \mathbf{y}^{(e)}_{\mathrm{pert}} - \mathbf{y}^{f,(e)}.
+\]
+
+分析更新公式为
+\[
+\mathbf{x}^{a,(e)}
+= \mathbf{x}^{f,(e)} + K\,\mathbf{d}^{(e)}.
+\]
+
+这份代码最值得注意的一点是：虽然只观测了 $h$，但由于 $K$ 是由完整状态与观测之间的互协方差构成的，所以分析步会同时更新
+\[
+h,\qquad hu,\qquad hv.
+\]
+这正是 EnKF 的核心能力：通过协方差把观测信息传播到未被直接观测的变量上。
+
+\section{EnSRF 分析步}
+
+\subsection{为什么需要平方根滤波}
+
+随机 EnKF 的分析更新
+\[
+\mathbf{x}^{a,(e)}
+= \mathbf{x}^{f,(e)} + K\,\mathbf{d}^{(e)}
+\]
+需要对每个成员加入一份独立的观测扰动。这样做的优点是公式直接，但缺点也很明显：即使理论上分析协方差应该收缩到某个确定值，有限集合下额外加入的观测噪声仍会引入采样误差。
+
+EnSRF 的思想是：\textbf{不再对观测做随机扰动}，而是把分析更新拆成
+\[
+\text{均值更新} + \text{离差更新},
+\]
+并直接构造一个确定性的离差收缩公式，使分析样本协方差满足卡尔曼滤波所要求的收缩关系。
+
+\subsection{本程序使用的是串行标量观测 EnSRF}
+
+代码中的 \texttt{ensrf\_analysis()} 不是一次性处理整个观测向量，而是按观测点
+\[
+p=1,2,\dots,m
+\]
+逐个顺序更新。对第 $p$ 个观测，记其对应网格索引为 $k_p$，则该标量观测为
+\[
+y_p = h_{k_p}^{\mathrm{truth}} + \varepsilon_p,
+\qquad
+\varepsilon_p \sim \mathcal{N}(0,R), \qquad R=\sigma_{\mathrm{obs}}^2.
+\]
+
+由于这里只观测水深，所以对第 $e$ 个预测成员有
+\[
+h x_p^{(e)} = h_{k_p}^{f,(e)}.
+\]
+这里把 $hx$ 记成“观测算子作用到状态后的结果”，因为在一般写法里它对应
+\[
+h x_p^{(e)} = H_p \mathbf{x}^{f,(e)}.
+\]
+
+\subsection{第 1 步：观测均值与观测离差}
+
+对固定的第 $p$ 个观测，程序先计算预测观测均值
+\[
+\bar{y}_p^f
+= \frac{1}{N_e}\sum_{e=1}^{N_e} h x_p^{(e)},
+\]
+并构造每个成员的观测离差
+\[
+h x_p^{\prime (e)}
+= h x_p^{(e)} - \bar{y}_p^f.
+\]
+
+代码中的数组 \texttt{hxp[e]} 就是这里的
+\[
+h x_p^{\prime (e)}.
+\]
+
+\subsection{第 2 步：标量观测方差}
+
+然后代码计算该观测方向上的预测样本方差
+\[
+H P^f H^{\mathsf T}
+= \frac{1}{N_e-1}
+\sum_{e=1}^{N_e}
+\left(h x_p^{\prime (e)}\right)^2.
+\]
+
+在程序里这个量记为 \texttt{hpht}。再加上观测误差方差，就得到标量分母
+\[
+\text{denom} = H P^f H^{\mathsf T} + R.
+\]
+
+\subsection{第 3 步：均值更新}
+
+第 $p$ 个观测的创新写成
+\[
+d_p = y_p - \bar{y}_p^f.
+\]
+
+对任意一个状态分量 $x_r$，程序先计算它与该观测的样本协方差
+\[
+\mathrm{cov}(x_r, h x_p)
+= \frac{1}{N_e-1}
+\sum_{e=1}^{N_e}
+\left(x_r^{f,(e)}-\bar{x}_r^f\right)
+h x_p^{\prime(e)}.
+\]
+
+于是标量卡尔曼增益为
+\[
+K_r = \frac{\mathrm{cov}(x_r, h x_p)}{H P^f H^{\mathsf T}+R}.
+\]
+
+均值更新就是普通卡尔曼滤波的标量形式：
+\[
+\bar{x}_r^a = \bar{x}_r^f + K_r d_p.
+\]
+
+在代码里，对每个网格点的三个物理分量分别对应
+\[
+K_h,\qquad K_{hu},\qquad K_{hv},
+\]
+因此虽然只观测了水深，三个分量的均值都会通过协方差被同时修正。
+
+\subsection{第 4 步：离差更新}
+
+EnSRF 的关键区别在于：它不再使用扰动观测，而是直接更新成员离差。程序中采用的缩放系数为
+\[
+\alpha = \frac{1}{1+\sqrt{R/(H P^f H^{\mathsf T}+R)}}.
+\]
+
+于是第 $e$ 个成员的离差更新写成
+\[
+x_r^{\prime a,(e)}
+= x_r^{\prime f,(e)} - \alpha K_r h x_p^{\prime (e)}.
+\]
+
+把均值更新与离差更新合并回成员本身，就得到代码中的公式
+\[
+x_r^{a,(e)}
+= x_r^{f,(e)} + K_r d_p - \alpha K_r h x_p^{\prime (e)}.
+\]
+
+这正对应 \texttt{ensrf\_analysis()} 里的更新结构：
+\[
+\texttt{ens[e].state += mean\_increment - anomaly\_factor * hxp[e]}.
+\]
+
+\subsection{为什么这个系数是合理的}
+
+对于标量观测，分析协方差应满足
+\[
+P^a = P^f - K H P^f.
+\]
+EnSRF 的目标是找到一个确定性的离差变换，使样本离差矩阵的协方差恰好满足这一关系。上面的
+\[
+\alpha = \frac{1}{1+\sqrt{R/(H P^f H^{\mathsf T}+R)}}
+\]
+就是串行 EnSRF 在标量观测下的标准结果。它控制离差收缩的强度：
+\begin{itemize}
+    \item 当观测非常精确、$R$ 很小时，$\alpha$ 较大，离差收缩更明显；
+    \item 当观测噪声较大时，$\alpha$ 较小，分析对集合离差的收缩也更弱。
+\end{itemize}
+
+\subsection{本程序中的串行实现含义}
+
+因为程序是按观测点顺序更新，所以一次完整的 EnSRF 分析相当于做
+\[
+\mathbf{x}^{f}
+\xrightarrow{\;y_1\;}
+\mathbf{x}^{(1)}
+\xrightarrow{\;y_2\;}
+\cdots
+\xrightarrow{\;y_m\;}
+\mathbf{x}^{a}.
+\]
+
+理论上，如果线性高斯条件完全成立，并且数值上不受舍入影响，那么串行标量更新与一次性矢量更新是等价的。实际有限集合中，两者在实现细节和采样误差上会略有差别，但串行 EnSRF 的优点是实现简单，且避免了对整个观测协方差矩阵做一次大规模求逆。
+
+\subsection{与随机 EnKF 的对比}
+
+两种滤波器在本代码中的共同部分是：
+\begin{enumerate}
+    \item 使用同一个预测模式；
+    \item 使用同一批观测；
+    \item 都通过集合样本协方差把 $h$ 观测传播到 $hu,hv$；
+    \item 分析后都做 $h \ge HMIN$ 的物理约束修正。
+\end{enumerate}
+
+它们的主要不同点是：
+\begin{enumerate}
+    \item 随机 EnKF 用完整观测向量一次更新，并显式构造
+    \[
+    K = P_{xy}(P_{yy}+R)^{-1};
+    \]
+    \item EnSRF 对每个标量观测顺序更新，不使用观测扰动；
+    \item 随机 EnKF 的分析噪声部分来自人工加入的观测扰动；EnSRF 则通过确定性的离差缩放来达到正确的协方差收缩。
+\end{enumerate}
+
+\section{\texttt{ensrf\_analysis()} 的逐段公式解释}
+
+这一节把 \texttt{ensrf\_analysis()} 按代码执行顺序翻译成数学公式。它和上一节的 EnSRF 理论是一一对应的，只不过这里更强调实现细节。
+
+\subsection{第 1 步：按观测顺序串行处理}
+
+函数输入的是一整个集合 $\{\mathbf{x}^{f,(e)}\}_{e=1}^{N_e}$、观测向量 $\mathbf{y}$ 和观测索引 \texttt{obs\_idx}。但代码并不一次性处理所有观测，而是
+\[
+p = 1,2,\dots,m
+\]
+逐个更新。对每个观测点 $p$，它先取出对应的网格索引
+\[
+k_p = \texttt{obs\_idx[p]}.
+\]
+
+这意味着该函数实际实现的是串行标量 EnSRF：
+\[
+\mathbf{x}^{f}
+\xrightarrow{\;y_1\;}
+\mathbf{x}^{(1)}
+\xrightarrow{\;y_2\;}
+\cdots
+\xrightarrow{\;y_m\;}
+\mathbf{x}^{a}.
+\]
+
+\subsection{第 2 步：计算该观测的均值和离差}
+
+对固定的第 $p$ 个观测，代码先计算观测均值
+\[
+\bar{y}_p^f = \frac{1}{N_e}\sum_{e=1}^{N_e} h_{k_p}^{f,(e)}.
+\]
+
+随后构造观测离差
+\[
+h x_p^{\prime(e)} = h_{k_p}^{f,(e)} - \bar{y}_p^f.
+\]
+
+在代码里，这个离差被临时存进数组 \texttt{hxp[e]}，以便后面的协方差和离差更新重复使用。
+
+\subsection{第 3 步：计算标量分母}
+
+接下来代码累加
+\[
+H P^f H^{\mathsf T}
+= \frac{1}{N_e-1}\sum_{e=1}^{N_e}\left(h x_p^{\prime(e)}\right)^2,
+\]
+然后加上观测误差方差 $R=\sigma_{\mathrm{obs}}^2$，得到
+\[
+\text{denom} = H P^f H^{\mathsf T} + R.
+\]
+
+如果这个分母非常小，代码会跳过该观测，避免除零或不稳定更新。
+
+\subsection{第 4 步：对每个状态分量计算协方差}
+
+对任意状态分量 $x_r$，程序先计算集合均值，再构造样本协方差
+\[
+\mathrm{cov}(x_r, h x_p)
+= \frac{1}{N_e-1}
+\sum_{e=1}^{N_e}
+\left(x_r^{f,(e)}-\bar{x}_r^f\right) h x_p^{\prime(e)}.
+\]
+
+在实现上，这里对三类分量分别计算：
+\[
+x_r \in \{h_k,\; (hu)_k,\; (hv)_k\}.
+\]
+这对应代码中的三个累加量 \texttt{cov\_h}, \texttt{cov\_hu}, \texttt{cov\_hv}。
+
+\subsection{第 5 步：构造标量卡尔曼增益}
+
+利用上面的协方差和分母，代码计算
+\[
+K_r = \frac{\mathrm{cov}(x_r, h x_p)}{H P^f H^{\mathsf T}+R}.
+\]
+
+如果把所有状态分量拼起来，这一串标量增益就构成了该观测对应的增益向量。但在代码里它并不显式形成整列向量，而是直接保留三个分量的标量增益用于后续更新。
+
+\subsection{第 6 步：更新均值}
+
+该观测的创新为
+\[
+d_p = y_p - \bar{y}_p^f.
+\]
+
+于是均值更新写成
+\[
+\bar{x}_r^a = \bar{x}_r^f + K_r d_p.
+\]
+
+在程序中，更新结果并不是先单独存均值，而是直接写回每个集合成员的状态更新式中。
+
+\subsection{第 7 步：更新成员离差}
+
+EnSRF 和随机 EnKF 的核心区别在这里。代码采用缩放系数
+\[
+\alpha = \frac{1}{1+\sqrt{R/(H P^f H^{\mathsf T}+R)}},
+\]
+并对每个成员执行
+\[
+x_r^{a,(e)}
+= x_r^{f,(e)} + K_r d_p - \alpha K_r h x_p^{\prime(e)}.
+\]
+
+这等价于“均值修正 + 离差收缩”：
+\[
+x_r^{\prime a,(e)}
+= x_r^{\prime f,(e)} - \alpha K_r h x_p^{\prime(e)}.
+\]
+
+代码里对每个网格点都分别算出 $h$、$hu$、$hv$ 的三个增量，然后一次性写回当前集合成员。
+
+\subsection{第 8 步：物理约束检查}
+
+完成该观测的更新后，代码调用
+\[
+\texttt{apply\_physical\_floor()}
+\]
+检查每个集合成员的水深是否满足
+\[
+h \ge HMIN.
+\]
+
+如果某个网格点出现负水深、非有限值或者动量发散，就把该点重置为
+\[
+h = HMIN,\qquad hu=0,\qquad hv=0.
+\]
+
+这一步和 \texttt{enkf\_analysis()} 中的处理是相同的，本质上是数值稳定性保护，不是滤波公式本身的一部分。
+
+\subsection{一句话总结 \texttt{ensrf\_analysis()}}
+
+如果把整个函数压缩成一句数学描述，那么它做的是：
+\[
+\text{对每个观测 } y_p,\;
+\text{先算 } K_r \text{ 和 } \alpha,\;
+\text{再用 } x_r^{a,(e)} = x_r^{f,(e)} + K_r d_p - \alpha K_r h x_p^{\prime(e)}
+\text{ 顺序更新整个集合。}
+\]
+
+\section{\texttt{enkf\_analysis()} 的逐段公式解释}
+
+这一节的目标是把 \texttt{enkf\_analysis()} 从上到下翻译成数学公式。读完以后，应该可以直接对照 C 代码理解每一个数组在做什么。
+
+\subsection{第 1 步：把三个物理数组拼成一个状态向量}
+
+在代码里，单个成员的状态存成三段：
+\[
+\texttt{h[0:N-1]},\qquad \texttt{hu[0:N-1]},\qquad \texttt{hv[0:N-1]}.
+\]
+为了写成统一的矩阵公式，程序实际上等价于把它们拼成
+\[
+\mathbf{x}^{(e)} =
+\begin{pmatrix}
+\mathbf{h}^{(e)} \\
+\mathbf{hu}^{(e)} \\
+\mathbf{hv}^{(e)}
+\end{pmatrix}
+\in \mathbb{R}^{3N}.
+\]
+
+代码中
+\[
+\texttt{nstate} = 3\times \texttt{ncell}
+\]
+就是这个总状态维数。
+
+\subsection{第 2 步：计算预测集合均值 \texttt{xmean}}
+
+代码先对所有成员求平均：
+\[
+\bar{\mathbf{x}}^f
+= \frac{1}{N_e}\sum_{e=1}^{N_e}\mathbf{x}^{f,(e)}.
+\]
+
+在实现上，\texttt{xmean} 的前三段分别存储
+\[
+\bar{\mathbf{h}}^f,\qquad \overline{\mathbf{hu}}^f,\qquad \overline{\mathbf{hv}}^f.
+\]
+
+也就是说，代码片段
+\[
+\texttt{xmean[k]},\quad
+\texttt{xmean[ncell+k]},\quad
+\texttt{xmean[2*ncell+k]}
+\]
+分别对应
+\[
+\bar h_k^f,\qquad \overline{hu}_k^f,\qquad \overline{hv}_k^f.
+\]
+
+\subsection{第 3 步：把每个成员映射到观测空间，得到 \texttt{Y} 与 \texttt{ymean}}
+
+对于每个成员 $e$ 和每个观测点 $p$，代码执行
+\[
+Y[e,p] = h^{f,(e)}_{k_p},
+\]
+其中 $k_p=\texttt{obs\_idx[p]}$。这就是
+\[
+\mathbf{y}^{f,(e)} = \mathcal{H}(\mathbf{x}^{f,(e)}).
+\]
+
+随后求观测空间均值
+\[
+\bar{\mathbf{y}}^f
+= \frac{1}{N_e}\sum_{e=1}^{N_e}\mathbf{y}^{f,(e)}.
+\]
+
+因此：
+\begin{itemize}
+    \item \texttt{Y[e*m+p]} 是第 $e$ 个成员在第 $p$ 个观测点上的预测观测值；
+    \item \texttt{ymean[p]} 是该观测分量的集合均值。
+\end{itemize}
+
+\subsection{第 4 步：构造离差并计算 \texttt{Pxy}}
+
+接下来代码进入一个三重循环。对每个成员和每个观测分量，它先计算观测离差
+\[
+dy_p^{(e)} = y_p^{f,(e)} - \bar y_p^f.
+\]
+然后对每个状态分量计算状态离差，例如
+\[
+dx_{h,k}^{(e)} = h_k^{f,(e)} - \bar h_k^f,
+\]
+\[
+dx_{hu,k}^{(e)} = (hu)_k^{f,(e)} - \overline{hu}_k^f,
+\]
+\[
+dx_{hv,k}^{(e)} = (hv)_k^{f,(e)} - \overline{hv}_k^f.
+\]
+
+代码中把它们逐项累加为
+\[
+P_{xy}[k,p] \mathrel{+}= dx_{h,k}^{(e)}\,dy_p^{(e)},
+\]
+\[
+P_{xy}[N+k,p] \mathrel{+}= dx_{hu,k}^{(e)}\,dy_p^{(e)},
+\]
+\[
+P_{xy}[2N+k,p] \mathrel{+}= dx_{hv,k}^{(e)}\,dy_p^{(e)}.
+\]
+
+最后再乘上
+\[
+\frac{1}{N_e-1}
+\]
+就得到标准样本互协方差
+\[
+P_{xy}
+= \frac{1}{N_e-1}
+\sum_{e=1}^{N_e}
+\left(\mathbf{x}^{f,(e)}-\bar{\mathbf{x}}^f\right)
+\left(\mathbf{y}^{f,(e)}-\bar{\mathbf{y}}^f\right)^{\mathsf T}.
+\]
+
+这一步非常关键，因为它正是观测信息传播到未观测变量的桥梁。
+
+\subsection{第 5 步：计算 \texttt{Pyy}}
+
+代码中
+\[
+\texttt{dyp = Y[e*m+p] - ymean[p]},\qquad
+\texttt{dyq = Y[e*m+q] - ymean[q]}
+\]
+对应的是观测离差向量的两个分量。因此
+\[
+P_{yy}[p,q] \mathrel{+}= dyp^{(e)}\,dyq^{(e)}
+\]
+累加后并除以 $N_e-1$，得到
+\[
+P_{yy}
+= \frac{1}{N_e-1}
+\sum_{e=1}^{N_e}
+\left(\mathbf{y}^{f,(e)}-\bar{\mathbf{y}}^f\right)
+\left(\mathbf{y}^{f,(e)}-\bar{\mathbf{y}}^f\right)^{\mathsf T}.
+\]
+
+\subsection{第 6 步：构造 \texttt{S = Pyy + R}}
+
+代码先令
+\[
+S = P_{yy},
+\]
+然后只在对角线上加上观测误差方差：
+\[
+S_{pp} \leftarrow S_{pp} + \sigma_{\mathrm{obs}}^2.
+\]
+
+因此这一步在数学上就是
+\[
+S = P_{yy} + R,
+\qquad R = \sigma_{\mathrm{obs}}^2 I.
+\]
+
+之所以只加对角项，是因为程序假设不同观测误差彼此独立。
+
+\subsection{第 7 步：求逆并计算卡尔曼增益 \texttt{K}}
+
+代码调用
+\[
+\texttt{invert\_matrix(S, Sinv, m)}
+\]
+得到
+\[
+S^{-1}.
+\]
+
+随后按矩阵乘法显式累加
+\[
+K[k,q]
+= \sum_{p=1}^{m} P_{xy}[k,p]\,(S^{-1})_{pq}.
+\]
+
+这正是
+\[
+K = P_{xy}S^{-1}.
+\]
+
+这里需要注意维数：
+\[
+P_{xy}\in \mathbb{R}^{3N\times m},\qquad
+S^{-1}\in \mathbb{R}^{m\times m},\qquad
+K\in \mathbb{R}^{3N\times m}.
+\]
+
+\subsection{第 8 步：生成扰动观测并计算创新 \texttt{innov}}
+
+对每个成员，代码生成
+\[
+y^{(e)}_{\mathrm{pert},p}
+= y_p + \sigma_{\mathrm{obs}} \eta_p^{(e)},
+\qquad \eta_p^{(e)}\sim \mathcal{N}(0,1),
+\]
+然后计算创新
+\[
+\texttt{innov[p]} = y^{(e)}_{\mathrm{pert},p} - Y[e,p].
+\]
+
+也就是说
+\[
+\mathbf{d}^{(e)}
+= \mathbf{y}^{(e)}_{\mathrm{pert}} - \mathbf{y}^{f,(e)}.
+\]
+
+\subsection{第 9 步：用 \texttt{K} 更新每个成员}
+
+代码对每个网格点 $k$ 分别计算三个增量
+\[
+dh_k = \sum_{p=1}^{m} K_{h}(k,p)\, d_p^{(e)},
+\]
+\[
+d(hu)_k = \sum_{p=1}^{m} K_{hu}(k,p)\, d_p^{(e)},
+\]
+\[
+d(hv)_k = \sum_{p=1}^{m} K_{hv}(k,p)\, d_p^{(e)},
+\]
+然后更新
+\[
+h_k^{a,(e)} = h_k^{f,(e)} + dh_k,
+\]
+\[
+(hu)_k^{a,(e)} = (hu)_k^{f,(e)} + d(hu)_k,
+\]
+\[
+(hv)_k^{a,(e)} = (hv)_k^{f,(e)} + d(hv)_k.
+\]
+
+把三段合在一起，就是标准 EnKF 更新公式
+\[
+\mathbf{x}^{a,(e)}
+= \mathbf{x}^{f,(e)} + K\,\mathbf{d}^{(e)}.
+\]
+
+\subsection{第 10 步：物理约束修正}
+
+更新后，代码还检查
+\[
+h < HMIN
+\]
+的情形；如果出现，就把该点重置为
+\[
+h=HMIN,\qquad hu=0,\qquad hv=0.
+\]
+
+这一步不属于标准 EnKF 理论，而是数值稳定性与物理可接受性约束。它的作用是防止分析更新把局部水深改成非物理的负值或极小值。
+
+\subsection{一句话总结 \texttt{enkf\_analysis()}}
+
+如果把整个函数压缩成一句数学描述，那么它做的是：
+\[
+\text{用预测集合估计 } P_{xy},P_{yy},
+\text{ 再构造 } K=P_{xy}(P_{yy}+R)^{-1},
+\text{ 最后对每个成员执行 } \mathbf{x}^a=\mathbf{x}^f+K\mathbf{d}.
+\]
+
+\section{与代码一一对应的算法流程}
+
+把 \texttt{main()} 中的同化循环翻译成数学步骤，可以写成：
+
+\subsection*{Step 1: 推进真值}
+\[
+\mathbf{x}^{\mathrm{truth}}_k
+= \mathcal{M}_{20}\left(\mathbf{x}^{\mathrm{truth}}_{k-1}\right).
+\]
+
+\subsection*{Step 2: 推进两套集合成员}
+\[
+\mathbf{x}^{f,(e)}_{k,\mathrm{EnKF}}
+= \mathcal{M}\left(\mathbf{x}^{a,(e)}_{k-1,\mathrm{EnKF}}\right),
+\qquad
+\mathbf{x}^{f,(e)}_{k,\mathrm{EnSRF}}
+= \mathcal{M}\left(\mathbf{x}^{a,(e)}_{k-1,\mathrm{EnSRF}}\right),
+\qquad e=1,\dots,N_e.
+\]
+
+\subsection*{Step 3: 分别计算两套预测集合均值}
+\[
+\bar{\mathbf{x}}^f_{k,\mathrm{EnKF}}
+= \frac{1}{N_e}\sum_{e=1}^{N_e}\mathbf{x}^{f,(e)}_{k,\mathrm{EnKF}},
+\qquad
+\bar{\mathbf{x}}^f_{k,\mathrm{EnSRF}}
+= \frac{1}{N_e}\sum_{e=1}^{N_e}\mathbf{x}^{f,(e)}_{k,\mathrm{EnSRF}}.
+\]
+
+\subsection*{Step 4: 从真值生成观测}
+\[
+\mathbf{y}_k
+= \mathcal{H}\left(\mathbf{x}^{\mathrm{truth}}_k\right)
++ \boldsymbol{\varepsilon}_k.
+\]
+
+\subsection*{Step 5: 对 EnKF 构造矩阵增益}
+\[
+P_{xy,k}^{\mathrm{EnKF}},\qquad
+P_{yy,k}^{\mathrm{EnKF}},\qquad
+S_k = P_{yy,k}^{\mathrm{EnKF}}+R,\qquad
+K_k = P_{xy,k}^{\mathrm{EnKF}}S_k^{-1}.
+\]
+
+\subsection*{Step 6: 对 EnKF 更新每个成员}
+\[
+\mathbf{x}^{a,(e)}_{k,\mathrm{EnKF}}
+= \mathbf{x}^{f,(e)}_{k,\mathrm{EnKF}}
++ K_k
+\left(
+\mathbf{y}^{(e)}_{k,\mathrm{pert}} - \mathcal{H}(\mathbf{x}^{f,(e)}_{k,\mathrm{EnKF}})
+\right).
+\]
+
+\subsection*{Step 7: 对 EnSRF 逐个观测顺序更新}
+\[
+\mathbf{x}^{f}_{k,\mathrm{EnSRF}}
+\xrightarrow{\;y_{k,1}\;}
+\mathbf{x}^{(1)}_{k,\mathrm{EnSRF}}
+\xrightarrow{\;y_{k,2}\;}
+\cdots
+\xrightarrow{\;y_{k,m}\;}
+\mathbf{x}^{a}_{k,\mathrm{EnSRF}}.
+\]
+
+\subsection*{Step 8: 计算两套分析均值}
+\[
+\bar{\mathbf{x}}^a_{k,\mathrm{EnKF}}
+= \frac{1}{N_e}\sum_{e=1}^{N_e}\mathbf{x}^{a,(e)}_{k,\mathrm{EnKF}},
+\qquad
+\bar{\mathbf{x}}^a_{k,\mathrm{EnSRF}}
+= \frac{1}{N_e}\sum_{e=1}^{N_e}\mathbf{x}^{a,(e)}_{k,\mathrm{EnSRF}}.
+\]
+
+程序输出文件可概括为：
+\begin{itemize}
+    \item \texttt{comparison\_output/truth\_cycle***.csv}：对应时刻的真值场；
+    \item \texttt{comparison\_output/stoch\_enkf\_mean\_cycle***.csv}：随机 EnKF 的分析均值；
+    \item \texttt{comparison\_output/ensrf\_mean\_cycle***.csv}：EnSRF 的分析均值；
+    \item \texttt{comparison\_output/metrics.csv}：两种方法每个循环的 RMSE、spread 和 innovation 统计量。
+\end{itemize}
+
+\section{这份实现中的几个重要特点}
+
+\subsection{只观测水深，但更新完整状态}
+
+虽然观测中只有 $h$，但动量分量 $hu,hv$ 仍然会被更新。这不是额外假设，而是由样本互协方差 $P_{xy}$ 自动给出的。如果某个网格点的动量变化总是和观测位置的水深变化相关，那么分析步就会修正该动量分量。
+
+\subsection{没有局地化（localization）}
+
+代码直接使用全局样本协方差，没有做 Schur 乘积局地化。因此远距离虚假相关可能会出现，尤其是在集合规模较小而状态维数很大时。
+
+\subsection{没有膨胀（inflation）}
+
+程序中没有对集合离差进行乘法膨胀，也没有附加模型误差。因此随着同化循环推进，集合离散度有可能逐渐偏小，出现“集合塌缩”。
+
+\subsection{同时比较随机滤波与确定性平方根滤波}
+
+程序把同一初始集合复制成两份：一份走随机 EnKF，一份走确定性 EnSRF。这样做的好处是比较公平，因为两种方法面对的真值轨道、观测网络、观测噪声水平和初始样本是一致的。两者差异主要来自分析步本身：EnKF 使用扰动观测，EnSRF 使用确定性的离差收缩。
+
+\subsection{时间推进上的一个实现细节}
+
+代码让真值和每个集合成员都各自根据 CFL 自适应步长推进固定的 \texttt{20} 个时间步，而不是推进完全相同的物理时间长度。因此严格来说，同一“同化时刻”下不同成员累计的物理时间可能略有差别。这个差别在数值上也许不大，但从理论上讲，这是当前实现中的一个近似。
+
+\section{如何理解 RMSE\_f 与 RMSE\_a}
+
+程序在每个同化循环中输出
+\[
+\mathrm{RMSE}_f, \qquad \mathrm{RMSE}_a,
+\]
+但这里是分别对 EnKF 和 EnSRF 各算一组，表示预测均值和分析均值相对于真值的水深均方根误差：
+\[
+\mathrm{RMSE}(h)
+= \sqrt{
+\frac{1}{N}
+\sum_{k=1}^{N}\left(h_k^{\mathrm{mean}}-h_k^{\mathrm{truth}}\right)^2
+}.
+\]
+
+通常希望看到
+\[
+\mathrm{RMSE}_a < \mathrm{RMSE}_f,
+\]
+这说明观测确实帮助修正了预测误差。若比较两种方法，则通常进一步关心
+\[
+\mathrm{RMSE}_{a,\mathrm{EnKF}}
+\quad\text{与}\quad
+\mathrm{RMSE}_{a,\mathrm{EnSRF}}
+\]
+谁更小，以及哪一种方法的分析误差随循环推进更稳定。
+
+\section{总结}
+
+对这份代码而言，可以只记住下面五点：
+\begin{enumerate}
+    \item 前向模式是二维浅水方程的有限体积离散，状态变量是 $(h,hu,hv)$。
+    \item 观测只包含少量网格点上的水深 $h$，并带有高斯噪声。
+    \item 随机 EnKF 用样本协方差构造矩阵卡尔曼增益，并通过扰动观测更新每个成员。
+    \item EnSRF 不加观测扰动，而是把同化拆成“均值更新 + 离差确定性收缩”。
+    \item 即使没有直接观测 $hu,hv$，它们也会因为与 $h$ 的样本相关性而被两种滤波器一并更新。
+\end{enumerate}
+
+如果把程序看成一句话，那么它做的就是：用两组共享初始条件的浅水方程样本分别实现随机 EnKF 和确定性 EnSRF，并在相同观测条件下比较它们把观测信息传播回整个流场的效果。
+
+\end{document}
