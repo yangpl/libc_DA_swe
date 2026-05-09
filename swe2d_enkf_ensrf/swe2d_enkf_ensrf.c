@@ -530,6 +530,82 @@ static int invert_matrix(double *A, double *Ainv, int m)
     return 1;
 }
 
+static int symmetric_eigen_jacobi(const double *A, double *V, double *eval, int n)
+{
+    double *B = (double *)malloc((size_t)n * n * sizeof(double));
+    if (!B) return 0;
+
+    memcpy(B, A, (size_t)n * n * sizeof(double));
+    for (int i = 0; i < n * n; ++i) V[i] = 0.0;
+    for (int i = 0; i < n; ++i) V[i * n + i] = 1.0;
+
+    for (int iter = 0; iter < 50 * n * n; ++iter) {
+        int p = 0;
+        int q = 1;
+        double max_off = 0.0;
+
+        for (int i = 0; i < n; ++i) {
+            for (int j = i + 1; j < n; ++j) {
+                double aij = fabs(B[i * n + j]);
+                if (aij > max_off) {
+                    max_off = aij;
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+
+        if (max_off < 1.0e-12) break;
+
+        {
+            double app = B[p * n + p];
+            double aqq = B[q * n + q];
+            double apq = B[p * n + q];
+            double tau = (aqq - app) / (2.0 * apq);
+            double t = ((tau >= 0.0) ? 1.0 : -1.0) /
+                       (fabs(tau) + sqrt(1.0 + tau * tau));
+            double c = 1.0 / sqrt(1.0 + t * t);
+            double s = t * c;
+
+            for (int k = 0; k < n; ++k) {
+                if (k != p && k != q) {
+                    double bkp = B[k * n + p];
+                    double bkq = B[k * n + q];
+                    double new_kp = c * bkp - s * bkq;
+                    double new_kq = s * bkp + c * bkq;
+                    B[k * n + p] = new_kp;
+                    B[p * n + k] = new_kp;
+                    B[k * n + q] = new_kq;
+                    B[q * n + k] = new_kq;
+                }
+            }
+
+            B[p * n + p] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+            B[q * n + q] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+            B[p * n + q] = 0.0;
+            B[q * n + p] = 0.0;
+
+            for (int k = 0; k < n; ++k) {
+                double vkp = V[k * n + p];
+                double vkq = V[k * n + q];
+                V[k * n + p] = c * vkp - s * vkq;
+                V[k * n + q] = s * vkp + c * vkq;
+            }
+        }
+    }
+
+    for (int i = 0; i < n; ++i) {
+        eval[i] = B[i * n + i];
+        if (!isfinite(eval[i])) {
+            free(B);
+            return 0;
+        }
+    }
+
+    free(B);
+    return 1;
+}
+
 static int stochastic_enkf_analysis(Field *ens, int Ne, const Grid *grid,
                                     const int *obs_idx, int m,
                                     const double *y, double obs_std,
@@ -658,87 +734,140 @@ static int ensrf_analysis(Field *ens, int Ne, const Grid *grid,
                           const double *y, double obs_std)
 {
     int ncell = grid->nx * grid->ny;
-    double inv_nm1 = 1.0 / (Ne - 1);
+    int nstate = 3 * ncell;
+    double inv_ne = 1.0 / Ne;
+    double inv_sqrt_nm1 = 1.0 / sqrt((double)(Ne - 1));
+    double sqrt_nm1 = sqrt((double)(Ne - 1));
     double R = obs_std * obs_std;
     int clipped = 0;
-    double *hxp = (double *)malloc((size_t)Ne * sizeof(double));
+    double *xmean = (double *)calloc((size_t)nstate, sizeof(double));
+    double *ymean = (double *)calloc((size_t)m, sizeof(double));
+    double *A = (double *)malloc((size_t)nstate * Ne * sizeof(double));
+    double *Yanom = (double *)malloc((size_t)Ne * m * sizeof(double));
+    double *T = (double *)calloc((size_t)Ne * Ne, sizeof(double));
+    double *Tinv = (double *)calloc((size_t)Ne * Ne, sizeof(double));
+    double *Teigvec = (double *)calloc((size_t)Ne * Ne, sizeof(double));
+    double *Teigval = (double *)malloc((size_t)Ne * sizeof(double));
+    double *Tsqrtinv = (double *)calloc((size_t)Ne * Ne, sizeof(double));
+    double *rhs = (double *)calloc((size_t)Ne, sizeof(double));
+    double *wa = (double *)calloc((size_t)Ne, sizeof(double));
 
-    (void)grid;
-
-    if (!hxp) {
-        fprintf(stderr, "EnSRF allocation failed\n");
+    if (!xmean || !ymean || !A || !Yanom || !T || !Tinv || !Teigvec ||
+        !Teigval || !Tsqrtinv || !rhs || !wa) {
+        fprintf(stderr, "deterministic EnKF allocation failed\n");
         exit(1);
     }
 
-    for (int p = 0; p < m; ++p) {
-        int ok = obs_idx[p];
-        double hxbar = 0.0;
-        double hpht = 0.0;
-        double denom;
-        double innov;
-        double alpha;
-
-        for (int e = 0; e < Ne; ++e) hxbar += ens[e].h[ok];
-        hxbar /= Ne;
-
-        for (int e = 0; e < Ne; ++e) {
-            hxp[e] = ens[e].h[ok] - hxbar;
-            hpht += hxp[e] * hxp[e];
-        }
-        hpht *= inv_nm1;
-
-        denom = hpht + R;
-        if (denom < 1.0e-30) continue;
-
-        innov = y[p] - hxbar;
-        alpha = (R <= 0.0) ? 1.0 : 1.0 / (1.0 + sqrt(R / denom));
-
+    for (int e = 0; e < Ne; ++e) {
         for (int k = 0; k < ncell; ++k) {
-            double mean_h = 0.0;
-            double mean_hu = 0.0;
-            double mean_hv = 0.0;
-            double cov_h = 0.0;
-            double cov_hu = 0.0;
-            double cov_hv = 0.0;
-            double kh;
-            double khu;
-            double khv;
-
-            for (int e = 0; e < Ne; ++e) {
-                mean_h += ens[e].h[k];
-                mean_hu += ens[e].hu[k];
-                mean_hv += ens[e].hv[k];
-            }
-            mean_h /= Ne;
-            mean_hu /= Ne;
-            mean_hv /= Ne;
-
-            for (int e = 0; e < Ne; ++e) {
-                cov_h += (ens[e].h[k] - mean_h) * hxp[e];
-                cov_hu += (ens[e].hu[k] - mean_hu) * hxp[e];
-                cov_hv += (ens[e].hv[k] - mean_hv) * hxp[e];
-            }
-            cov_h *= inv_nm1;
-            cov_hu *= inv_nm1;
-            cov_hv *= inv_nm1;
-
-            kh = cov_h / denom;
-            khu = cov_hu / denom;
-            khv = cov_hv / denom;
-
-            for (int e = 0; e < Ne; ++e) {
-                ens[e].h[k] += kh * innov - alpha * kh * hxp[e];
-                ens[e].hu[k] += khu * innov - alpha * khu * hxp[e];
-                ens[e].hv[k] += khv * innov - alpha * khv * hxp[e];
-            }
+            xmean[k] += ens[e].h[k];
+            xmean[ncell + k] += ens[e].hu[k];
+            xmean[2 * ncell + k] += ens[e].hv[k];
         }
+    }
+    for (int k = 0; k < nstate; ++k) xmean[k] *= inv_ne;
 
-        for (int e = 0; e < Ne; ++e) {
-            clipped += apply_physical_floor(&ens[e], ncell);
+    for (int e = 0; e < Ne; ++e) {
+        for (int p = 0; p < m; ++p) {
+            double val = ens[e].h[obs_idx[p]];
+            ymean[p] += val;
+        }
+    }
+    for (int p = 0; p < m; ++p) ymean[p] *= inv_ne;
+
+    for (int e = 0; e < Ne; ++e) {
+        for (int k = 0; k < ncell; ++k) {
+            A[k * Ne + e] = ens[e].h[k] - xmean[k];
+            A[(ncell + k) * Ne + e] = ens[e].hu[k] - xmean[ncell + k];
+            A[(2 * ncell + k) * Ne + e] = ens[e].hv[k] - xmean[2 * ncell + k];
+        }
+        for (int p = 0; p < m; ++p) {
+            Yanom[e * m + p] = (ens[e].h[obs_idx[p]] - ymean[p]) * inv_sqrt_nm1;
         }
     }
 
-    free(hxp);
+    for (int i = 0; i < Ne; ++i) {
+        T[i * Ne + i] = 1.0;
+        for (int j = i; j < Ne; ++j) {
+            double sum = 0.0;
+            for (int p = 0; p < m; ++p) {
+                sum += Yanom[i * m + p] * Yanom[j * m + p];
+            }
+            sum /= R;
+            T[i * Ne + j] += sum;
+            if (j != i) T[j * Ne + i] += sum;
+        }
+    }
+
+    if (!invert_matrix(T, Tinv, Ne)) {
+        fprintf(stderr, "deterministic EnKF inversion failed\n");
+        exit(1);
+    }
+
+    for (int i = 0; i < Ne; ++i) {
+        double sum = 0.0;
+        for (int p = 0; p < m; ++p) {
+            sum += Yanom[i * m + p] * (y[p] - ymean[p]);
+        }
+        rhs[i] = sum / R;
+    }
+    for (int i = 0; i < Ne; ++i) {
+        double sum = 0.0;
+        for (int j = 0; j < Ne; ++j) sum += Tinv[i * Ne + j] * rhs[j];
+        wa[i] = sum;
+    }
+
+    if (!symmetric_eigen_jacobi(T, Teigvec, Teigval, Ne)) {
+        fprintf(stderr, "deterministic EnKF eigendecomposition failed\n");
+        exit(1);
+    }
+    for (int i = 0; i < Ne; ++i) {
+        if (Teigval[i] < 1.0e-14) Teigval[i] = 1.0e-14;
+    }
+
+    for (int i = 0; i < Ne; ++i) {
+        for (int j = 0; j < Ne; ++j) {
+            double sum = 0.0;
+            for (int l = 0; l < Ne; ++l) {
+                sum += Teigvec[i * Ne + l] *
+                       (1.0 / sqrt(Teigval[l])) *
+                       Teigvec[j * Ne + l];
+            }
+            Tsqrtinv[i * Ne + j] = sum;
+        }
+    }
+
+    for (int e = 0; e < Ne; ++e) {
+        for (int k = 0; k < ncell; ++k) {
+            double new_h = xmean[k];
+            double new_hu = xmean[ncell + k];
+            double new_hv = xmean[2 * ncell + k];
+
+            for (int j = 0; j < Ne; ++j) {
+                double coeff = Tsqrtinv[j * Ne + e] + wa[j] / sqrt_nm1;
+                new_h += A[k * Ne + j] * coeff;
+                new_hu += A[(ncell + k) * Ne + j] * coeff;
+                new_hv += A[(2 * ncell + k) * Ne + j] * coeff;
+            }
+
+            ens[e].h[k] = new_h;
+            ens[e].hu[k] = new_hu;
+            ens[e].hv[k] = new_hv;
+        }
+        clipped += apply_physical_floor(&ens[e], ncell);
+    }
+
+    free(xmean);
+    free(ymean);
+    free(A);
+    free(Yanom);
+    free(T);
+    free(Tinv);
+    free(Teigvec);
+    free(Teigval);
+    free(Tsqrtinv);
+    free(rhs);
+    free(wa);
     return clipped;
 }
 
