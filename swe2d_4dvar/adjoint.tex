@@ -1,0 +1,888 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[fontset=none]{ctex}
+\setCJKmainfont{SimSun}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\hypersetup{colorlinks,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setlength{\headheight}{15pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{二维浅水方程变分同化的伴随推导}
+\fancyhead[C]{}
+\fancyhead[R]{\thepage}
+
+\title{二维浅水方程变分同化的伴随推导\\
+\large 从连续伴随到离散伴随 —— 面向 \texttt{swe2d\_4dvar.c}}
+\author{杨鹏亮}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本文为二维浅水方程的变分数据同化（variational data assimilation, VarDA）准备伴随模型推导。目标是文档化与当前代码
+\texttt{swe2d\_4dvar.c} 一致的前向模式、切线性模式和伴随模式。文中并行给出两条路线：其一是"先求伴随再离散"（adjoint then discretize），即从连续浅水方程出发推导形式伴随偏微分方程；其二是"先离散再求伴随"（discretize then adjoint），即直接对当前有限体积 + Rusanov 通量 + RK2 时间推进做转置。对于真正的软件实现，后一条路线通常更可靠，因为它与现有前向程序逐步对应；而前一条路线更适合解释理论结构、代价函数梯度来源以及观测项如何注入伴随变量。最后给出当前 \texttt{swe2d\_4dvar.c} 的数值验证结果。
+\end{abstract}
+
+\tableofcontents
+
+\section{问题设置}
+
+\subsection{状态变量与前向方程}
+
+使用浅水方程的常规守恒变量形式，二维浅水方程用守恒变量
+\[
+\mathbf{q}(x,y,t)=
+\begin{pmatrix}
+h \\ m \\ n
+\end{pmatrix}
+=
+\begin{pmatrix}
+h \\ hu \\ hv
+\end{pmatrix}
+\]
+表示，其中 $h$ 是水深，$m=hu$ 与 $n=hv$ 是两个方向的动量。连续方程写成
+\begin{equation}
+\frac{\partial \mathbf{q}}{\partial t}
++ \frac{\partial \mathbf{f}(\mathbf{q})}{\partial x}
++ \frac{\partial \mathbf{g}(\mathbf{q})}{\partial y}
+= 0,
+\label{eq:eq1}
+\end{equation}
+其中
+\begin{equation}
+\mathbf{f}(\mathbf{q})=
+\begin{pmatrix}
+m \\
+\dfrac{m^2}{h}+\dfrac{1}{2}gh^2 \\
+\dfrac{mn}{h}
+\end{pmatrix},
+\qquad
+\mathbf{g}(\mathbf{q})=
+\begin{pmatrix}
+n \\
+\dfrac{mn}{h} \\
+\dfrac{n^2}{h}+\dfrac{1}{2}gh^2
+\end{pmatrix}.
+\label{eq:eq2}
+\end{equation}
+
+\subsection{4D-Var 代价函数}
+
+若目标是在时间窗 $[0,T]$ 内用离散时刻 $t_k$ 的观测估计初值 $\mathbf{q}_0$，标准 4D-Var 代价函数可写成（这里沿用常见的变分同化记号与伴随框架，可参考 \cite{asch2016data} 的相关章节）：
+\begin{equation}
+J(\mathbf{q}_0)
+= \frac{1}{2}\left(\mathbf{q}_0-\mathbf{q}_b\right)^{\mathsf T} B_0^{-1}\left(\mathbf{q}_0-\mathbf{q}_b\right)
++ \frac{1}{2}\sum_{k=1}^{N_{\mathrm{obs}}}
+\left(\mathcal{H}_k(\mathbf{q}(t_k))-\mathbf{y}_k\right)^{\mathsf T}
+R_k^{-1}
+\left(\mathcal{H}_k(\mathbf{q}(t_k))-\mathbf{y}_k\right),
+\label{eq:eq3}
+\end{equation}
+其中
+\begin{itemize}
+\item $\mathbf{q}_b$ 是背景初值；
+\item $B_0$ 是背景误差协方差；
+\item $\mathbf{y}_k$ 是时刻 $t_k$ 的观测；
+\item $\mathcal{H}_k$ 是观测算子；
+\item $R_k$ 是观测误差协方差。
+\end{itemize}
+
+在当前浅水实验中，若仍然只观测若干网格点上的水深 $h$，则 $\mathcal{H}_k$ 只是从全状态中抽取这些点的 $h$ 分量。当前观测模型与 EnKF/EnSRF 实验中的设置完全一致，只是现在不再做 Kalman 分析，而是通过梯度最小化 $J$。
+
+\section{前向模式的线性化}
+
+\subsection{连续切线性方程}
+
+令 $\delta \mathbf{q}$ 表示围绕某一非线性轨道 $\mathbf{q}$ 的微扰。因为
+\[
+\delta \mathbf{f} = A(\mathbf{q})\,\delta \mathbf{q},
+\qquad
+\delta \mathbf{g} = B(\mathbf{q})\,\delta \mathbf{q},
+\]
+其中通量 Jacobian 为
+\begin{equation}
+A(\mathbf{q})=\frac{\partial \mathbf{f}}{\partial \mathbf{q}}
+=
+\begin{pmatrix}
+0 & 1 & 0 \\
+gh-\dfrac{m^2}{h^2} & \dfrac{2m}{h} & 0 \\
+-\dfrac{mn}{h^2} & \dfrac{n}{h} & \dfrac{m}{h}
+\end{pmatrix},
+\label{eq:eq4}
+\end{equation}
+\begin{equation}
+B(\mathbf{q})=\frac{\partial \mathbf{g}}{\partial \mathbf{q}}
+=
+\begin{pmatrix}
+0 & 0 & 1 \\
+-\dfrac{mn}{h^2} & \dfrac{n}{h} & \dfrac{m}{h} \\
+gh-\dfrac{n^2}{h^2} & 0 & \dfrac{2n}{h}
+\end{pmatrix},
+\label{eq:eq5}
+\end{equation}
+所以连续切线性模式可写为
+\begin{equation}
+\frac{\partial\, \delta \mathbf{q}}{\partial t}
++ \frac{\partial}{\partial x}\left(A(\mathbf{q})\,\delta \mathbf{q}\right)
++ \frac{\partial}{\partial y}\left(B(\mathbf{q})\,\delta \mathbf{q}\right)
+= 0.
+\label{eq:eq6}
+\end{equation}
+
+这个写法很重要，因为它保留了守恒型结构。后面求伴随时，若从这个散度形式出发，推导过程会比先把方程展开成非守恒形式更清晰。
+
+\subsection{观测算子的线性化}
+
+若 $\mathcal{H}_k$ 是非线性的，则其线性化写成
+\begin{equation}
+\delta \mathbf{y}_k = H_k \,\delta \mathbf{q}(t_k),
+\qquad
+H_k := \mathcal{H}_k'(\mathbf{q}(t_k)).
+\label{eq:eq7}
+\end{equation}
+对于当前代码中的"抽取观测点水深"算子，$H_k$ 是一个稀疏选择矩阵，只在被观测的 $h$ 分量上取 $1$，其余为 $0$。
+
+\section{路线一：先求伴随再离散}
+
+\subsection{连续伴随方程}
+
+引入伴随变量
+\[
+\bm{\lambda}(x,y,t)=
+\begin{pmatrix}
+\lambda_h \\ \lambda_m \\ \lambda_n
+\end{pmatrix}.
+\]
+把连续约束通过拉格朗日乘子并入代价函数，可写出如下形式的拉格朗日泛函
+\begin{equation}
+\mathcal{L}
+= J(\mathbf{q}_0)
++ \int_0^T\!\!\int_{\Omega}
+\bm{\lambda}^{\mathsf T}
+\left(
+\frac{\partial \mathbf{q}}{\partial t}
++ \frac{\partial \mathbf{f}(\mathbf{q})}{\partial x}
++ \frac{\partial \mathbf{g}(\mathbf{q})}{\partial y}
+\right)\, d\Omega\, dt.
+\label{eq:eq8}
+\end{equation}
+
+下面给出从 \eqref{eq:eq8} 到连续伴随方程 \eqref{eq:eq9} 的逐步推导。最优性条件 $\delta\mathcal{L}=0$ 将产生三类结果：伴随 PDE（控制 $\bm{\lambda}$ 在时间窗内部的反向演化）、终端与跳跃条件（确定 $\bm{\lambda}$ 在 $t=T$ 和观测时刻的取值），以及初值梯度公式。下面按"变分→分部积分→收集系数"的顺序展开。
+
+\medskip
+\noindent\textbf{Step 1: 目标函数的变分。}令 $\delta\mathbf{q}$ 表示状态的任意变分，则 $J$ 的一阶变分为
+\[
+\delta J
+= (\mathbf{q}_0-\mathbf{q}_b)^{\mathsf T} B_0^{-1}\,\delta\mathbf{q}_0
++ \sum_{k} \bigl(H_k\mathbf{q}(t_k)-\mathbf{y}_k\bigr)^{\mathsf T} R_k^{-1} H_k\,\delta\mathbf{q}(t_k),
+\]
+其中 $H_k = \mathcal{H}_k'(\mathbf{q}(t_k))$ 是观测算子的线性化。
+
+\medskip
+\noindent\textbf{Step 2: 约束项的变分。}利用 $\delta\mathbf{f}=A\,\delta\mathbf{q}$ 与 $\delta\mathbf{g}=B\,\delta\mathbf{q}$，
+\[
+\delta\!\int_0^T\!\!\int_{\Omega} \bm{\lambda}^{\mathsf T}
+\Bigl(
+\frac{\partial\mathbf{q}}{\partial t}
++ \frac{\partial\mathbf{f}}{\partial x}
++ \frac{\partial\mathbf{g}}{\partial y}
+\Bigr) d\Omega\,dt
+=
+\int_0^T\!\!\int_{\Omega} \bm{\lambda}^{\mathsf T}
+\Bigl(
+\frac{\partial\,\delta\mathbf{q}}{\partial t}
++ \frac{\partial}{\partial x}\bigl(A\,\delta\mathbf{q}\bigr)
++ \frac{\partial}{\partial y}\bigl(B\,\delta\mathbf{q}\bigr)
+\Bigr) d\Omega\,dt.
+\]
+
+\medskip
+\noindent\textbf{Step 3: 分部积分——将导数从 $\delta\mathbf{q}$ 转移到 $\bm{\lambda}$。}
+时间项：
+\[
+\int_0^T \bm{\lambda}^{\mathsf T}\frac{\partial\,\delta\mathbf{q}}{\partial t}\,dt
+= \bigl[\bm{\lambda}^{\mathsf T}\delta\mathbf{q}\bigr]_{t=0}^{t=T}
+- \int_0^T \frac{\partial\bm{\lambda}^{\mathsf T}}{\partial t}\,\delta\mathbf{q}\,dt.
+\]
+空间项（以 $x$ 方向为例，$y$ 方向完全对称）：
+\[
+\int_{\Omega} \bm{\lambda}^{\mathsf T}
+\frac{\partial}{\partial x}\bigl(A\,\delta\mathbf{q}\bigr)\,d\Omega
+= \int_{\partial\Omega} \bm{\lambda}^{\mathsf T} A\,\delta\mathbf{q}\; n_x\,dS
+- \int_{\Omega} \frac{\partial\bm{\lambda}^{\mathsf T}}{\partial x}A\,\delta\mathbf{q}\,d\Omega.
+\]
+
+\medskip
+\noindent\textbf{Step 4: 代回最优性条件 $\delta\mathcal{L}=0$。}暂先假设空间边界项
+\[
+\int_{\partial\Omega} \bm{\lambda}^{\mathsf T} A\,\delta\mathbf{q}\; n_x\,dS = 0,
+\qquad
+\int_{\partial\Omega} \bm{\lambda}^{\mathsf T} B\,\delta\mathbf{q}\; n_y\,dS = 0
+\]
+在合适的边界条件下成立（离散情况下的对应处理见第 \ref{sec:bc-adjoint} 节），则
+\begin{multline*}
+\delta\mathcal{L}
+= \bigl[(\mathbf{q}_0-\mathbf{q}_b)^{\mathsf T} B_0^{-1} - \bm{\lambda}(0^+)^{\mathsf T}\bigr]\delta\mathbf{q}_0
++ \bm{\lambda}(T^+)^{\mathsf T}\delta\mathbf{q}(T) \\
++ \sum_{k} \bigl(H_k\mathbf{q}(t_k)-\mathbf{y}_k\bigr)^{\mathsf T} R_k^{-1} H_k\,\delta\mathbf{q}(t_k) \\
++ \int_0^T\!\!\int_{\Omega}
+\Bigl[
+-\frac{\partial\bm{\lambda}^{\mathsf T}}{\partial t}
+- \frac{\partial}{\partial x}\bigl(\bm{\lambda}^{\mathsf T}A\bigr)
+- \frac{\partial}{\partial y}\bigl(\bm{\lambda}^{\mathsf T}B\bigr)
+\Bigr]\delta\mathbf{q}\;d\Omega\,dt.
+\end{multline*}
+
+\medskip
+\noindent\textbf{Step 5: 冻结系数近似。}展开体积分中的导项：
+\[
+\frac{\partial}{\partial x}\bigl(\bm{\lambda}^{\mathsf T}A\bigr)
+= \bm{\lambda}^{\mathsf T}\frac{\partial A}{\partial x}
++ \frac{\partial\bm{\lambda}^{\mathsf T}}{\partial x}A,
+\qquad
+\frac{\partial}{\partial y}\bigl(\bm{\lambda}^{\mathsf T}B\bigr)
+= \bm{\lambda}^{\mathsf T}\frac{\partial B}{\partial y}
++ \frac{\partial\bm{\lambda}^{\mathsf T}}{\partial y}B.
+\]
+这里 $A(\mathbf{q})$ 和 $B(\mathbf{q})$ 通过 $\mathbf{q}$ 依赖于 $(x,y,t)$，因此 $\partial A/\partial x$ 和 $\partial B/\partial y$ 一般不为零。变分同化中常用的\textbf{冻结系数近似}忽略这两项，即沿非线性轨道视 $A,B$ 为局部常数。这样体积分系数简化为
+\[
+-\frac{\partial\bm{\lambda}}{\partial t}
+- A^{\mathsf T}\frac{\partial\bm{\lambda}}{\partial x}
+- B^{\mathsf T}\frac{\partial\bm{\lambda}}{\partial y}.
+\]
+这一近似的意义在于：它使伴随 PDE 保持与正向 PDE 相同的双曲型结构（仅时间方向反向），便于数值离散；但其代价是连续伴随不再是对原始离散模式的精确转置——这正是路线二（先离散再求伴随）存在价值的原因。
+
+\medskip
+\noindent\textbf{Step 6: 导出伴随 PDE。}由于 $\delta\mathbf{q}$ 在 $t\in(0,T)$ 内部任意，$\delta\mathcal{L}=0$ 要求该系数处处为零，即得到连续伴随方程
+\begin{equation}
+-\frac{\partial \bm{\lambda}}{\partial t}
+- A(\mathbf{q})^{\mathsf T}\frac{\partial \bm{\lambda}}{\partial x}
+- B(\mathbf{q})^{\mathsf T}\frac{\partial \bm{\lambda}}{\partial y}
+= 0,
+\qquad t\in (t_{k-1},t_k).
+\label{eq:eq9}
+\end{equation}
+这说明伴随变量沿时间反向传播，而传播系数正是前向通量 Jacobian 的转置。若不做冻结系数近似，伴随方程中还会出现与 $\partial A/\partial x$、$\partial B/\partial y$ 耦合的零阶项，其离散处理不仅更加复杂，而且一旦离散化后仍然不是对原始有限体积格式的精确转置。
+
+\subsection{观测时刻的跳跃条件}
+
+观测项只在离散时刻出现，因此伴随方程在观测时刻不是连续的，而是满足跳跃关系
+\begin{equation}
+\bm{\lambda}(t_k^-)
+=
+\bm{\lambda}(t_k^+)
++ H_k^{\mathsf T} R_k^{-1}
+\left(
+\mathcal{H}_k(\mathbf{q}(t_k))-\mathbf{y}_k
+\right).
+\label{eq:eq10}
+\end{equation}
+终端条件通常是
+\begin{equation}
+\bm{\lambda}(T^+) = 0,
+\label{eq:eq11}
+\end{equation}
+然后按照以下顺序向后积分：
+\[
+T \to t_{N_{\mathrm{obs}}} \to \cdots \to t_1 \to 0.
+\]
+
+\subsection{初值梯度}
+
+做完反向积分后，代价函数对初值的梯度为
+\begin{equation}
+\nabla_{\mathbf{q}_0} J
+= B_0^{-1}(\mathbf{q}_0-\mathbf{q}_b) - \bm{\lambda}(0^+).
+\label{eq:eq12}
+\end{equation}
+这正是 4D-Var 最核心的输出：一旦给定前向轨道，就可以用一次伴随积分把所有观测对初值的灵敏度压缩成一个梯度向量。
+
+\subsection{这一条路线的优点与局限}
+
+"先求伴随再离散"的优点是理论结构清楚：
+\begin{itemize}
+\item 它直接解释了为什么梯度等于"背景项减去初始伴随"；
+\item 它直接给出观测残差如何作为源项注入伴随系统；
+\item 它适合讨论边界条件、正则化项和连续最优性条件。
+\end{itemize}
+
+但它的局限也很明显。当前前向程序并不是连续 PDE，而是
+\begin{itemize}
+\item Rusanov 数值通量；
+\item 显式 Euler 子步；
+\item 两步 RK2 组合；
+\item 水深下限裁剪 \texttt{apply\_physical\_floor()}。
+\end{itemize}
+如果只对连续伴随 PDE 再做一个"看起来类似"的离散，并不能保证它就是现有代码的精确转置。因此从真正的软件实现角度，离散伴随更关键。
+
+\section{路线二：先离散再求伴随}
+
+\subsection{离散前向映射}
+
+设网格上所有单元的守恒变量按某种固定顺序堆叠成大向量 $\mathbf{Q}^n \in \mathbb{R}^{3N}$，其中 $N=N_xN_y$。忽略集合和同化部分，单个前向积分子步可以写成
+\begin{equation}
+\mathbf{Q}^{+} = \mathcal{E}_{\Delta t}(\mathbf{Q}),
+\label{eq:eq13}
+\end{equation}
+其中 $\mathcal{E}_{\Delta t}$ 对应 \texttt{euler\_update()}：
+\begin{equation}
+\mathbf{q}^{+}_{i,j}
+=
+\mathbf{q}_{i,j}
+- \frac{\Delta t}{\Delta x}
+\left(
+\widehat{\mathbf{f}}_{i+1/2,j}
+- \widehat{\mathbf{f}}_{i-1/2,j}
+\right)
+- \frac{\Delta t}{\Delta y}
+\left(
+\widehat{\mathbf{g}}_{i,j+1/2}
+- \widehat{\mathbf{g}}_{i,j-1/2}
+\right).
+\label{eq:eq14}
+\end{equation}
+
+代码中的二阶时间推进是
+\begin{align}
+\mathbf{Q}^{(1)} &= \mathcal{E}_{\Delta t}(\mathbf{Q}^n), \\
+\mathbf{Q}^{(2)} &= \mathcal{E}_{\Delta t}(\mathbf{Q}^{(1)}), \\
+\mathbf{Q}^{n+1} &= \frac{1}{2}\mathbf{Q}^{n} + \frac{1}{2}\mathbf{Q}^{(2)}.
+\label{eq:eq15}
+\end{align}
+如果暂时不把 \texttt{apply\_physical\_floor()} 的非光滑性加进去，那么这就是一个光滑离散映射
+\begin{equation}
+\mathbf{Q}^{n+1} = \mathcal{M}_n(\mathbf{Q}^n).
+\label{eq:eq16}
+\end{equation}
+
+当前 \texttt{swe2d\_4dvar.c} 使用的是固定时间步长
+\begin{equation}
+\Delta t = \frac{\Delta T}{N_{\text{step}}} = 0.002,
+\label{eq:eq17}
+\end{equation}
+因此 $\mathcal{M}_n$ 在不同时间步之间是统一的。
+
+\subsection{离散切线性模式}
+
+对一步 Euler 子步线性化，得到
+\begin{equation}
+\delta \mathbf{Q}^{+}
+=
+\mathcal{E}_{\Delta t}'(\mathbf{Q})\,\delta \mathbf{Q}.
+\label{eq:eq18}
+\end{equation}
+对一整个 RK2 步则有
+\begin{equation}
+\delta \mathbf{Q}^{n+1}
+=
+\mathcal{M}_n'(\mathbf{Q}^n)\,\delta \mathbf{Q}^n.
+\label{eq:eq19}
+\end{equation}
+于是离散伴随就是这些 Jacobian 的转置反向作用：
+\begin{equation}
+\bm{\Lambda}^{n}
+=
+\mathcal{M}_n'(\mathbf{Q}^n)^{\mathsf T}\bm{\Lambda}^{n+1}
++ H_n^{\mathsf T} R_n^{-1}
+\left(\mathcal{H}_n(\mathbf{Q}^{n})-\mathbf{y}_n\right),
+\label{eq:eq20}
+\end{equation}
+其中观测时刻才加入第二项。
+
+\subsection{Rusanov 通量的界面 Jacobian}
+
+数值通量
+\begin{equation}
+\widehat{\mathbf{f}}(\mathbf{q}_L,\mathbf{q}_R)
+=
+\frac{1}{2}\bigl(\mathbf{f}(\mathbf{q}_L)+\mathbf{f}(\mathbf{q}_R)\bigr)
+- \frac{1}{2}s(\mathbf{q}_L,\mathbf{q}_R)(\mathbf{q}_R-\mathbf{q}_L)
+\label{eq:eq21}
+\end{equation}
+对左右状态的导数分别为
+\begin{equation}
+\widehat{F}_L
+:=
+\frac{\partial \widehat{\mathbf{f}}}{\partial \mathbf{q}_L}
+=
+\frac{1}{2}A(\mathbf{q}_L)
++ \frac{1}{2}s I
+- \frac{1}{2}(\mathbf{q}_R-\mathbf{q}_L)
+\bigl(\nabla_{\mathbf{q}_L} s\bigr)^{\mathsf T},
+\label{eq:eq22}
+\end{equation}
+\begin{equation}
+\widehat{F}_R
+:=
+\frac{\partial \widehat{\mathbf{f}}}{\partial \mathbf{q}_R}
+=
+\frac{1}{2}A(\mathbf{q}_R)
+- \frac{1}{2}s I
+- \frac{1}{2}(\mathbf{q}_R-\mathbf{q}_L)
+\bigl(\nabla_{\mathbf{q}_R} s\bigr)^{\mathsf T}.
+\label{eq:eq23}
+\end{equation}
+$y$ 方向同理，记为 $\widehat{G}_B,\widehat{G}_T$。
+
+从 \eqref{eq:eq22}--\eqref{eq:eq23} 可以看出，界面 Jacobian 包含通量 Jacobian $A$ 自身的平均和耗散项 $s$ 及其梯度 $\nabla s$ 的贡献。要得到显式表达式，需要先明确 $s$ 的定义和可导性。
+
+\subsubsection{耗散速度 $s$ 的定义}
+
+Rusanov 通量中的耗散速度 $s$ 取左右两侧最大特征速度的较大者。对二维浅水方程，$x$ 方向的特征速度为 $u\pm c$ 和 $u$（$c=\sqrt{gh}$ 是重力波速），最大特征速度是 $|u|+c$。代码实现为
+\begin{equation}
+s = \max\bigl(a(\mathbf{q}_L),\; a(\mathbf{q}_R)\bigr),
+\qquad
+a(\mathbf{q}) = |u| + \sqrt{gh},
+\label{eq:eq24}
+\end{equation}
+其中 $u = hu/h$。$s$ 的物理解释是：它是 Riemann 问题中信息传播的最快速度，保证数值通量具有足够的耗散以抑制振荡。
+
+\subsubsection{梯度 $\nabla s$ 的推导及其在 Jacobian 中的作用}
+
+$s$ 通过 $u$ 和 $h$ 依赖于守恒变量 $(h,\,hu,\,hv)$。对任意一侧有
+\[
+a = |u| + \sqrt{gh},\qquad u = \frac{hu}{h},\qquad |u| = \frac{|hu|}{h}\;(h>0).
+\]
+
+$a$ 对各守恒变量的偏导数为
+\[
+\frac{\partial a}{\partial h}
+= -\frac{|hu|}{h^2} + \frac12\sqrt{\frac{g}{h}}
+= -\frac{|u|}{h} + \frac12\sqrt{\frac{g}{h}},\qquad
+\frac{\partial a}{\partial(hu)} = \frac{\operatorname{sgn}(hu)}{h}
+= \frac{\operatorname{sgn}(u)}{h},\qquad
+\frac{\partial a}{\partial(hv)} = 0.
+\]
+
+记 $\nabla a$ 为以上分量构成的列向量。因 $s = \max(a_L, a_R)$：
+\begin{itemize}
+\item 当 $a_L > a_R$ 时，$\nabla_{\mathbf{q}_L}s = \nabla a(\mathbf{q}_L)$，$\nabla_{\mathbf{q}_R}s = 0$；
+\item 当 $a_R > a_L$ 时，$\nabla_{\mathbf{q}_L}s = 0$，$\nabla_{\mathbf{q}_R}s = \nabla a(\mathbf{q}_R)$．
+\end{itemize}
+在切换点 $a_L = a_R$ 处导数不存在。但由于该集合在状态空间中为零测集（实际计算几乎不会精确落在分支边界上），且两分支内均可单独定义导数，因此这一不可导性在应用中通常可忽略——只需在分支边界处任取一侧的次梯度即可。
+
+\subsubsection{冻结耗散近似}
+
+工程上通常采用以下两种策略处理 $\nabla s$ 的非光滑性：
+\begin{itemize}
+\item \textbf{分段导数}：按当前前向轨道所在的分支套用上述解析 $\nabla s$；
+\item \textbf{冻结耗散系数}：直接设 $\nabla_{\mathbf{q}_L}s = \nabla_{\mathbf{q}_R}s = 0$，即视 $s$ 为不依赖于状态的局部常数。
+\end{itemize}
+冻结近似使 \eqref{eq:eq22}--\eqref{eq:eq23} 中的外积项 $(\mathbf{q}_R-\mathbf{q}_L)(\nabla s)^{\mathsf T}$ 消失，简化为
+\begin{equation}
+\widehat{F}_L \approx \frac12 A(\mathbf{q}_L) + \frac12 s I,
+\qquad
+\widehat{F}_R \approx \frac12 A(\mathbf{q}_R) - \frac12 s I.
+\label{eq:eq25}
+\end{equation}
+该近似等价于假定 Riemann 问题的耗散结构在邻域内不随状态变化，在非线性不强的浅水波问题中通常足够准确。当前 \texttt{swe2d\_4dvar.c} 采用的正是这一近似：\texttt{rusanov\_x\_jacobians} 函数中虽计算了 $\nabla s$ 但仅从最大速度一侧生效，本质上等同于 \eqref{eq:eq25}。
+
+\subsection{一步 Euler 的离散伴随}
+
+把 Euler 子步写成
+\begin{equation}
+\mathbf{q}^{+}_{i,j}
+=
+\mathbf{q}_{i,j} + \mathbf{R}_{i,j}(\mathbf{Q}),
+\label{eq:eq26}
+\end{equation}
+其中
+\begin{equation}
+\mathbf{R}_{i,j}(\mathbf{Q})
+=
+- \frac{\Delta t}{\Delta x}
+\left(
+\widehat{\mathbf{f}}_{i+1/2,j}
+- \widehat{\mathbf{f}}_{i-1/2,j}
+\right)
+- \frac{\Delta t}{\Delta y}
+\left(
+\widehat{\mathbf{g}}_{i,j+1/2}
+- \widehat{\mathbf{g}}_{i,j-1/2}
+\right).
+\label{eq:eq27}
+\end{equation}
+则切线性形式为
+\begin{equation}
+\delta \mathbf{q}^{+}_{i,j}
+= \delta \mathbf{q}_{i,j}
++ \sum_{(r,s)\in\mathcal{N}_{i,j}}
+J_{i,j;r,s}\,\delta \mathbf{q}_{r,s},
+\label{eq:eq28}
+\end{equation}
+其中 $\mathcal{N}_{i,j}$ 是五点邻域，$J_{i,j;r,s}$ 来自四个界面通量对邻近单元状态的导数。
+
+相应的离散伴随更新则是
+\begin{equation}
+\bm{\lambda}_{r,s}
+\mathrel{+}=
+\left(I + J_{i,j;r,s}\right)^{\mathsf T}
+\bm{\lambda}^{+}_{i,j},
+\qquad (r,s)\in\mathcal{N}_{i,j},
+\label{eq:eq29}
+\end{equation}
+对所有 $(i,j)$ 累加。写成算法语言，就是把前向中"一个单元从四个界面取信息"的过程，改成反向中"一个单元的伴随向四个界面相关单元回传贡献"。
+
+\subsubsection{离散伴随的逐项分解}
+
+上面给出的是抽象形式（\eqref{eq:eq29}），在实际实现中每个界面的 Jacobian 包含四个独立的贡献来源。对照 \texttt{euler\_adjoint()} 的代码结构，一个中心单元 $(i,j)$ 对应的伴随更新可以分解为以下五项。
+
+\paragraph{1. 自身恒等项} 伴随变量的第一项来自前向 Euler 子步中的恒等映射 $\mathbf{q}^+_{i,j} \leftarrow \mathbf{q}_{i,j}$，因此
+\[
+\bm{\lambda}_{i,j} \mathrel{+}= \bm{\lambda}^+_{i,j}.
+\]
+这一项对应于代码中的
+\begin{verbatim}
+lam_in->h[k]  += v[0];
+lam_in->hu[k] += v[1];
+lam_in->hv[k] += v[2];
+\end{verbatim}
+
+\paragraph{2. 右界面 $(i+1/2,j)$ 的反传} 前向中该界面的通量 $\widehat{\mathbf{f}}_{i+1/2,j}$ 以负号进入 $(i,j)$ 单元的更新：
+\[
+\mathbf{q}^+_{i,j} = \cdots \;-\; \frac{\Delta t}{\Delta x}\,\widehat{\mathbf{f}}(\mathbf{q}_{i,j},\mathbf{q}_{i+1,j}) \;+\; \cdots
+\]
+因此伴随回传时，两个参与单元分别接收
+\[
+\begin{aligned}
+\bm{\lambda}_{i,j}   &\mathrel{+}= -\frac{\Delta t}{\Delta x}\,\widehat{F}_L^{\mathsf T}\,\bm{\lambda}^+_{i,j}, \\[2pt]
+\bm{\lambda}_{i+1,j} &\mathrel{+}= -\frac{\Delta t}{\Delta x}\,\widehat{F}_R^{\mathsf T}\,\bm{\lambda}^+_{i,j},
+\end{aligned}
+\]
+其中 $\widehat{F}_L,\widehat{F}_R$ 即为 \eqref{eq:eq22}--\eqref{eq:eq23} 定义的界面 Jacobian。括号外的系数 $-\Delta t/\Delta x$ 正来自 \eqref{eq:eq14} 中该通量前面的负号和度量因子。
+
+\paragraph{3. 左界面 $(i-1/2,j)$ 的反传} 该通量以正号进入 $(i,j)$ 的更新：
+\[
+\mathbf{q}^+_{i,j} = \cdots \;+\; \frac{\Delta t}{\Delta x}\,\widehat{\mathbf{f}}(\mathbf{q}_{i-1,j},\mathbf{q}_{i,j}) \;+\; \cdots
+\]
+所以
+\[
+\begin{aligned}
+\bm{\lambda}_{i-1,j} &\mathrel{+}=  \frac{\Delta t}{\Delta x}\,\widehat{F}_L^{\mathsf T}\,\bm{\lambda}^+_{i,j}, \\[2pt]
+\bm{\lambda}_{i,j}   &\mathrel{+}=  \frac{\Delta t}{\Delta x}\,\widehat{F}_R^{\mathsf T}\,\bm{\lambda}^+_{i,j}.
+\end{aligned}
+\]
+
+\paragraph{4. 上界面 $(i,j+1/2)$ 的反传} 完全对称，仅将 $x$ 方向替换为 $y$：
+\[
+\begin{aligned}
+\bm{\lambda}_{i,j}   &\mathrel{+}= -\frac{\Delta t}{\Delta y}\,\widehat{G}_B^{\mathsf T}\,\bm{\lambda}^+_{i,j}, \\[2pt]
+\bm{\lambda}_{i,j+1} &\mathrel{+}= -\frac{\Delta t}{\Delta y}\,\widehat{G}_T^{\mathsf T}\,\bm{\lambda}^+_{i,j}.
+\end{aligned}
+\]
+
+\paragraph{5. 下界面 $(i,j-1/2)$ 的反传}
+\[
+\begin{aligned}
+\bm{\lambda}_{i,j-1} &\mathrel{+}=  \frac{\Delta t}{\Delta y}\,\widehat{G}_B^{\mathsf T}\,\bm{\lambda}^+_{i,j}, \\[2pt]
+\bm{\lambda}_{i,j}   &\mathrel{+}=  \frac{\Delta t}{\Delta y}\,\widehat{G}_T^{\mathsf T}\,\bm{\lambda}^+_{i,j}.
+\end{aligned}
+\]
+
+在 \texttt{euler\_adjoint()} 中，这四个界面 Jacobian 的转置乘法利用辅助函数 \texttt{add\_matT\_vec\_to\_cell()} 实现：给定一个 $3\times3$ Jacobian 矩阵 $J$ 和一个三维向量 $\mathbf{v}$，该函数计算
+\[
+\mathrm{cell} \mathrel{+}= J^{\mathsf T}\mathbf{v},
+\]
+正好对应上面五个段落中的 $\widehat{F}_L^{\mathsf T}\bm{\lambda}^+$ 等形式。最后，$\bm{\lambda}_{i,j}$ 的完整更新是以上五项的和：
+\[
+\bm{\lambda}_{i,j}
+= \bm{\lambda}^+_{i,j}
+- \frac{\Delta t}{\Delta x}\bigl(\widehat{F}_{R,(i,j)}^{\mathsf T}+\widehat{F}_{L,(i,j)}^{\mathsf T}\bigr)\bm{\lambda}^+_{i,j}
++ \frac{\Delta t}{\Delta x}\widehat{F}_{R,(i-1,j)}^{\mathsf T}\bm{\lambda}^+_{i-1,j}
+- \frac{\Delta t}{\Delta y}\bigl(\widehat{G}_{T,(i,j)}^{\mathsf T}+\widehat{G}_{B,(i,j)}^{\mathsf T}\bigr)\bm{\lambda}^+_{i,j}
++ \frac{\Delta t}{\Delta y}\widehat{G}_{T,(i,j-1)}^{\mathsf T}\bm{\lambda}^+_{i,j-1},
+\]
+其中 $\widehat{F}_{R,(i,j)}$ 表示界面 $(i+1/2,j)$ 对右状态 $\mathbf{q}_{i+1,j}$ 的 Jacobian，$\widehat{F}_{L,(i,j)}$ 表示同一界面对左状态 $\mathbf{q}_{i,j}$ 的 Jacobian，余类推。这一分解把 \eqref{eq:eq29} 中抽象的 $I+J_{i,j;r,s}$ 展开成了代码中具体可见的四对界面调用。
+
+这个逐项分解的核心思想也正是 \texttt{swe.tex} 中强调的：\textbf{每一个前向操作（差分、平均、最大值选取）都有一个对应的转置累加操作}。对当前有限体积框架而言，"离散伴随"就是遍历所有界面通量的依赖关系，把 $\widehat{F}_L$、$\widehat{F}_R$ 的转置以符号正确的系数累加到参与单元的伴随变量上。
+
+\subsection{两步 RK2 的离散伴随}
+
+当前代码的 RK2 不是抽象的 Butcher 表，而是明确的三步组合：
+\begin{align}
+\mathbf{Q}^{(1)} &= \mathcal{E}_{\Delta t}(\mathbf{Q}^{n}), \\
+\mathbf{Q}^{(2)} &= \mathcal{E}_{\Delta t}(\mathbf{Q}^{(1)}), \\
+\mathbf{Q}^{n+1} &= \frac{1}{2}\mathbf{Q}^{n} + \frac{1}{2}\mathbf{Q}^{(2)}.
+\label{eq:eq30}
+\end{align}
+因此它的伴随必须严格按反向顺序执行。
+
+若已知下一时刻伴随 $\bm{\Lambda}^{n+1}$，则反向传播为：
+
+\paragraph{Step 1: 回传最终平均}
+\begin{equation}
+\bm{\Lambda}^{(2)} = \frac{1}{2}\bm{\Lambda}^{n+1},
+\qquad
+\bm{\Lambda}^{n} \mathrel{+}= \frac{1}{2}\bm{\Lambda}^{n+1}.
+\label{eq:eq31}
+\end{equation}
+
+\paragraph{Step 2: 回传第二次 Euler}
+\begin{equation}
+\bm{\Lambda}^{(1)}
+=
+\mathcal{E}_{\Delta t}'(\mathbf{Q}^{(1)})^{\mathsf T}
+\bm{\Lambda}^{(2)}.
+\label{eq:eq32}
+\end{equation}
+
+\paragraph{Step 3: 回传第一次 Euler}
+\begin{equation}
+\bm{\Lambda}^{n}
+\mathrel{+}=
+\mathcal{E}_{\Delta t}'(\mathbf{Q}^{n})^{\mathsf T}
+\bm{\Lambda}^{(1)}.
+\label{eq:eq33}
+\end{equation}
+
+这就是当前 \texttt{euler\_adjoint()} + \texttt{rk2\_adjoint\_step()} 的精确离散伴随结构。可以看出，若要实现它，前向积分时至少要保存或重建
+\[
+\mathbf{Q}^{n},\qquad \mathbf{Q}^{(1)},
+\]
+否则第二次 Euler 的转置就无法计算。当前代码在 \texttt{evaluate\_cost\_gradient()} 中通过 \texttt{traj[n]} 和 \texttt{stage1[n]} 两个数组同时保留了 $\mathbf{Q}^{n}$ 和 $\mathbf{Q}^{(1)}$，这正是为此准备的。
+
+\subsubsection{边界条件对应的伴随转置}
+\label{sec:bc-adjoint}
+
+前向模式通过 \texttt{get\_state\_bc()} 将越界索引钳制到边界单元：
+\[
+\mathbf{q}_{-1,j} \leftarrow \mathbf{q}_{0,j},\quad
+\mathbf{q}_{N_x,j} \leftarrow \mathbf{q}_{N_x-1,j},\quad
+\mathbf{q}_{i,-1} \leftarrow \mathbf{q}_{i,0},\quad
+\mathbf{q}_{i,N_y} \leftarrow \mathbf{q}_{i,N_y-1}.
+\]
+这等价于一种离散零梯度（Neumann）延拓。在离散伴随中，这个操作的转置意味着：如果多个前向索引都映射到同一个边界单元，则该边界单元的伴随变量需要接收所有这些路径的累加贡献。具体地，\texttt{euler\_adjoint()} 中通过对称的索引钳制
+\begin{verbatim}
+int iL = (i > 0) ? (i - 1) : 0;
+int iR = (i + 1 < grid->nx) ? (i + 1) : (grid->nx - 1);
+\end{verbatim}
+自然地实现了这一转置：当 $i=0$ 时，左边界外的伴随贡献全部累加到 $i=0$ 自身；当 $i=N_x-1$ 时，右边界外的贡献全部累加到 $i=N_x-1$。
+
+注意这与连续伴随推导中"假设空间边界项为零"的做法不同。连续边界条件只是形式化地假设边界积分消失，而离散边界条件的转置是精确且自动的——只要前向代码如何处理越界访问，其转置就是同样的索引约束，只是数据流向相反。
+
+\subsection{观测项与全时间窗梯度}
+
+若离散观测恰好放在模式时间层 $n_k$，则伴随在这些时刻执行跳跃
+\begin{equation}
+\bm{\Lambda}^{n_k}
+\mathrel{+}=
+H_{n_k}^{\mathsf T} R_{n_k}^{-1}
+\left(
+\mathcal{H}_{n_k}(\mathbf{Q}^{n_k})-\mathbf{y}_{n_k}
+\right).
+\label{eq:eq34}
+\end{equation}
+然后把伴随从末时刻一直回传到 $n=0$。最终得到
+\begin{equation}
+\nabla_{\mathbf{Q}^0} J
+=
+B_0^{-1}(\mathbf{Q}^0-\mathbf{Q}_b) - \bm{\Lambda}^{0}.
+\label{eq:eq35}
+\end{equation}
+
+\section{与当前代码对接时必须说明的关键问题}
+
+\subsection{物理裁剪不是光滑算子}
+
+\texttt{apply\_physical\_floor()} 在
+\[
+h < HMIN
+\]
+或出现非有限数时，把状态直接改成
+\[
+h=HMIN,\qquad hu=0,\qquad hv=0.
+\]
+这不是可微操作，所以严格伴随不存在。常见处理方式是：
+\begin{itemize}
+\item 在基准推导里先忽略它，把它看成"很少触发的安全修正"；
+\item 若某些网格点触发裁剪，则在伴随中把这些点的导数冻结为零或采用次梯度近似；
+\item 更稳妥的做法是在变分实验中尽量选取不触发裁剪的轨道。
+\end{itemize}
+在当前 4D-Var 数值实验中，裁剪次数为零，因此把它暂时排除在伴随主推导之外是合理的。
+
+\subsection{固定时间步长简化了伴随实现}
+
+当前 \texttt{swe2d\_4dvar.c} 采用固定时间步长
+\begin{equation}
+\Delta t = \frac{\Delta T}{\mathtt{VAR\_STEPS\_WINDOW}} = 0.002,
+\label{eq:eq36}
+\end{equation}
+这与 EnKF/EnSRF 代码中的自适应 CFL 步长不同。固定步长给离散伴随带来了一个重要简化：$\Delta t$ 不依赖于状态，因此不需要在伴随中额外求导。伴随积分时只需沿用前向的固定步长序列，即可保证与离散前向模式精确对应。从实现角度看，这是从确定性 4D-Var 入手的一个合理选择。
+
+\subsection{边界条件在连续与离散推导中并不完全等价}
+
+如前文 \S\ref{sec:bc-adjoint} 所述，代码通过 \texttt{get\_state\_bc()} 把越界索引钳制到边界单元，相当于一种离散零梯度延拓。连续伴随推导中"假设空间边界项为零"只是一种形式化说明；真正实现时，最安全的办法仍然是直接对离散边界处理做转置（\S\ref{sec:bc-adjoint} 已给出显式公式），而不是先猜测一个连续边界伴随条件。
+
+\subsection{为什么实现上更推荐离散伴随}
+
+对当前项目而言，若后续目标是把 VarDA 真正写进 C 程序，优先级应当是：
+\begin{enumerate}
+\item 先把单成员前向模式抽象成纯映射 $\mathbf{Q}^{n+1}=\mathcal{M}_n(\mathbf{Q}^n)$；
+\item 再实现这个映射的切线性与离散伴随；
+\item 最后在外层再组装背景项、观测项和优化器。
+\end{enumerate}
+原因很直接：这样得到的伴随与现有前向代码逐行对应，更容易做梯度检验。
+
+\subsection{梯度检验方法}
+
+离散伴随实现的正确性需要通过数值验证。最常用的检验是\textbf{梯度检验}（gradient test）：对任意方向 $\delta\mathbf{Q}^0$，用有限差分估计的方向导数应与伴随提供的梯度内积一致。具体地，对足够小的 $\varepsilon$，
+\[
+\Phi(\varepsilon) := \frac{J(\mathbf{Q}^0 + \varepsilon\,\delta\mathbf{Q}^0) - J(\mathbf{Q}^0)}
+{\varepsilon\,\langle\nabla J_{\text{adj}},\,\delta\mathbf{Q}^0\rangle}
+\]
+应趋近于 $1$。更严格的检验利用 Taylor 展开：
+\[
+J(\mathbf{Q}^0 + \varepsilon\,\delta\mathbf{Q}^0)
+= J(\mathbf{Q}^0)
++ \varepsilon\,\langle\nabla J_{\text{adj}},\,\delta\mathbf{Q}^0\rangle
++ \mathcal{O}(\varepsilon^2),
+\]
+因此若伴随梯度正确，则
+\[
+\lim_{\varepsilon\to 0} \frac{|J(\mathbf{Q}^0 + \varepsilon\,\delta\mathbf{Q}^0) - J(\mathbf{Q}^0)|}
+{|\varepsilon|\,|\langle\nabla J_{\text{adj}},\,\delta\mathbf{Q}^0\rangle|} = 1,
+\]
+且数值上随 $\varepsilon$ 减半，比值应趋近于 $1$ 的收敛速度接近 $\mathcal{O}(\varepsilon)$（受有限差分截断误差限制）。
+
+当前代码中的 \texttt{swe2d\_4dvar.c} 没有内置梯度检验例程（4D-Var 优化本身已间接验证梯度的可用性），但在开发阶段建议单写一个 \texttt{gradient\_test.c} 或利用 Python 脚本 \texttt{plot\_4dvar\_result.py} 的接口，在每次迭代前用随机方向做一次梯度检验，以确保离散伴随的转置关系没有因代码修改而破坏。
+
+\section{两条路线的关系}
+
+这两条路线并不是互相排斥的。更准确地说：
+\begin{itemize}
+\item "先求伴随再离散"提供理论蓝图，告诉我们伴随变量的物理含义、观测残差如何反向传播，以及梯度为什么取这个形式；
+\item "先离散再求伴随"提供可落地的算法对象，保证最终实现对应的是当前数值模式，而不是另一个相似但不同的模式。
+\end{itemize}
+
+对二维浅水方程这样的非线性守恒律，二者只有在非常仔细的离散设计下才会接近；对当前代码所采用的 Rusanov 通量、边界钳制和裁剪来说，二者通常不会严格一致。因此，若目标是推导报告，应该两条都写；若目标是程序实现，应该以离散伴随为主。
+
+\section{建议的后续实现路线}
+
+如果下一步要把 VarDA 真正接进当前项目，一个务实的实现顺序是：
+\begin{enumerate}
+\item 从单个确定性前向模式开始，不考虑集合，先做一个最基本的 4D-Var；
+\item 暂时只同化水深 $h$ 观测，保持与现有观测网络一致；
+\item 先实现离散切线性和离散伴随，并用有限差分做梯度检验；
+\item 梯度检验通过后，再接入 L-BFGS 或共轭梯度等优化器；
+\item 最后再考虑加入更复杂背景协方差或更多物理项。
+\end{enumerate}
+
+\section{数值验证：当前 4D-Var 原型的行为}
+
+前面的各节主要讨论了离散伴随应该如何构造。但对一个真正可用的 4D-Var 程序，仅有公式还不够，还必须检查优化过程与重建结果是否合理。\\
+当前目录中的 \texttt{swe2d\_4dvar.c} 已经给出了一个最基本的强约束 4D-Var 原型：控制变量是初值 $\mathbf{Q}^0$，观测仍然是稀疏网格点上的水深 $h$，时间窗覆盖 $30$ 个同化周期。每个周期长度为
+\begin{equation}
+\Delta T = 0.04,
+\label{eq:eq37}
+\end{equation}
+而在 4D-Var 内部，为了让离散伴随与前向模式严格对应，程序使用固定子步
+\begin{equation}
+\Delta t = 0.002,
+\label{eq:eq38}
+\end{equation}
+即每个周期 $20$ 个 RK2 子步，整个时间窗共 $600$ 个离散时间步。
+
+\subsection{整体代价函数与轨道误差}
+
+图 \ref{fig:var-metrics} 汇总了这次实验的两类核心指标。第一类是优化迭代本身：总代价函数和梯度范数随迭代的变化。第二类是优化后轨道相对于真值的误差：在每个观测时刻比较背景轨道与 4D-Var 重建轨道的水深 RMSE。
+
+从 \texttt{var\_output/cost\_history.csv} 可以直接读出，这个 4D-Var 原型在 $12$ 次迭代内把总代价函数从
+\[
+2.5877\times 10^2
+\]
+降到了
+\[
+2.5137\times 10^2,
+\]
+总降幅约为
+\[
+7.39,
+\]
+末次代价约为初值的 $97.1\%$。由于程序使用了回溯线搜索，这个\textbf{总目标函数}在每次接受步后都是单调下降的，这一点是离散优化层面应该具备的最基本性质。
+
+更重要的是轨道误差本身。当前实验里，4D-Var 在全部 $31$ 个输出时刻（含初值时刻）都优于背景轨道。若只看 $30$ 个真正的观测周期，则平均 RMSE 比值
+\[
+\frac{\mathrm{RMSE}_{\mathrm{4DVar}}}{\mathrm{RMSE}_{\mathrm{background}}}
+\approx 0.247,
+\]
+说明优化后的轨道误差平均只有背景的约四分之一。在终止时刻 $t=1.20$，背景 RMSE 约为
+\[
+1.3781\times 10^{-3},
+\]
+而 4D-Var 轨道 RMSE 约为
+\[
+8.6723\times 10^{-5},
+\]
+绝对改进约为
+\[
+1.2914\times 10^{-3}.
+\]
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{var_output/var_4d_metrics.png}
+    \caption{当前 4D-Var 原型的整体统计验证。左上为背景轨道与 4D-Var 重建轨道的 RMSE 对比，右上为相对 RMSE 比值，左下为总代价函数迭代历史，右下为梯度范数与线搜索步长。}
+    \label{fig:var-metrics}
+\end{figure}
+
+\subsection{空间误差结构}
+
+仅看时间序列还不足以说明重建质量，因为 4D-Var 的目标并不是只让某个标量 RMSE 变小，而是让整个时间窗里的流场演化与观测相容。图 \ref{fig:var-snapshots} 选取了早期、中期和末期三个代表性时刻，分别显示真值场、背景误差、4D-Var 误差以及两者之差。
+
+这些图说明了两点。第一，4D-Var 并不是只在观测点周围局部修正水深，而是通过动力学约束把初值信息传播到整个时间窗和整个流场。第二，虽然观测只包含少量 $h$ 数据，但经过离散伴随反传后，优化器仍能有效修正控制变量，从而在大尺度上减弱背景轨道的系统误差。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.92\textwidth]{var_output/var_4d_snapshots.png}
+    \caption{代表性时刻的场验证图。每一列对应一个代表性周期；四行依次是真值场、背景误差、4D-Var 误差，以及背景减去 4D-Var 的改进场。观测点位置与 \texttt{obs\_config.csv} 一致。}
+    \label{fig:var-snapshots}
+\end{figure}
+
+\subsection{为什么"每个周期 misfit 不一定单调下降"}
+
+这里必须强调一个经常引起误解的点。当前程序求解的是\textbf{单个全时间窗}上的强约束 4D-Var 问题，控制变量只有初值 $\mathbf{Q}^0$。因此线搜索保证单调下降的是\textbf{总目标函数}
+\begin{equation}
+J = J_b + \sum_{k=1}^{30} J_k^{\mathrm{obs}},
+\label{eq:eq39}
+\end{equation}
+而不是每一个周期单独的观测失配项 $J_k^{\mathrm{obs}}$。换言之，优化器完全可能在某次迭代里让某些周期的观测误差稍微变大，只要其余周期的改进更大，从而使整个时间窗总代价继续下降。
+
+为避免把"总目标函数下降"和"逐周期失配下降"混为一谈，当前代码额外输出了
+\texttt{var\_output/iter\_cycle\_misfit.csv}，并在图 \ref{fig:var-cycle-misfit} 中给出每个周期在每次迭代上的观测 RMS 失配。当前实验结果非常清楚：
+\begin{itemize}
+\item 总代价函数在 $12$ 次迭代中保持单调下降；
+\item 但 $30$ 个观测周期中，只有 $4$ 个周期的观测 RMS 失配是严格单调下降的；
+\item 其余 $26$ 个周期都出现了某种程度的迭代间起伏。
+\end{itemize}
+
+这并不是程序错误，而正是\textbf{全窗口 4D-Var} 的正常特征。因为优化器求解的是一个耦合的全局反问题，不同观测时刻之间通过动力学约束彼此竞争同一个初值自由度。若想让每个周期都像独立反问题那样各自单调下降，就必须改变算法结构，例如改成逐周期独立求解、滚动时间窗，或者把控制变量从单个初值扩展为分段控制。
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.92\textwidth]{var_output/var_4d_cycle_misfit.png}
+    \caption{逐周期观测失配的迭代历史。左图是所有周期的 observation RMS 热图，右图给出若干代表性周期和全周期平均值的失配曲线。该图说明：总目标函数单调下降，并不意味着每一个周期的观测失配都必须逐次单调下降。}
+    \label{fig:var-cycle-misfit}
+\end{figure}
+
+\subsection{这一节验证了什么}
+
+对当前这份 4D-Var 原型，以上数值结果至少说明了三件事。第一，离散伴随驱动的梯度下降在数值上是工作的，因为总代价函数能够稳定下降。第二，优化后的轨道相对于背景轨道有显著改进，说明反传得到的初值梯度方向具有正确的物理信息。第三，若考察的是逐周期 misfit，就必须区分"全局目标单调下降"和"局部观测项逐次下降"这两个不同概念；对单窗口 4D-Var 来说，后者本来就不应被当作必需性质。
+
+\section{结论}
+
+对当前二维浅水方程代码，变分同化所需的伴随推导可以概括为两句话。第一，连续层面上，伴随变量满足一个由通量 Jacobian 转置控制的反向传播方程，并在观测时刻接收由观测残差驱动的跳跃。第二，真正实现时，应当把现有有限体积 + Rusanov + RK2 的离散模式视为基本对象，直接构造它的离散伴随，这样才能保证得到的梯度与前向程序一致。
+
+因此，本文档的建议立场是：\textbf{用连续伴随解释理论，用离散伴随指导编码。}
+
+\bibliographystyle{plain}
+\bibliography{ref}
+
+\end{document}
