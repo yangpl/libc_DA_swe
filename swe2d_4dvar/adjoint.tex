@@ -754,7 +754,10 @@ B_0^{-1}(\mathbf{Q}^0-\mathbf{Q}_b) + \bm{\Lambda}^{0}.
 \item \texttt{iter\_cycle\_misfit.csv}：每次迭代、每个观测周期的观测项代价和观测 RMS；
 \item \texttt{trajectory\_metrics.csv}：背景轨道和分析轨道相对于真值的水深 RMSE；
 \item \texttt{truth\_cycle*.csv}, \texttt{background\_cycle*.csv}, \texttt{analysis\_cycle*.csv}：各输出时刻的格点场；
-\item \texttt{obs\_config.csv}：观测点所在网格单元。
+\item \texttt{obs\_config.csv}：观测点所在网格单元；
+\item \texttt{fd\_adjoint\_check.csv}：随机方向上的 Taylor 梯度检验；
+\item \texttt{fd\_adjoint\_components.csv}：抽样控制分量上的中心有限差分与伴随梯度对比；
+\item \texttt{fd\_adjoint\_components\_summary.txt}：逐分量检验的范数、相关系数和最大误差摘要。
 \end{itemize}
 
 \subsection{优化算法}
@@ -868,6 +871,37 @@ $1-|\Phi(\varepsilon)|$，因此理想极限是 $0$；右图画的是 Taylor 余
     \label{fig:fd-adjoint-check}
 \end{figure}
 
+随机方向的 Taylor 检验可以验证整体方向导数，但不容易定位某个变量分量或索引映射错误。因此当前程序还会从完整初值控制向量
+$\mathbf{Q}^0\in\mathbb{R}^{3N_xN_y}$ 中确定性抽取若干分量，并对每个分量做中心有限差分：
+\begin{equation}
+\left(\nabla J\right)_p^{\mathrm{FD}}
+=\frac{J(\mathbf{Q}^0+\varepsilon\mathbf{e}_p)-
+       J(\mathbf{Q}^0-\varepsilon\mathbf{e}_p)}{2\varepsilon},
+\qquad \varepsilon=10^{-6}.
+\label{eq:eq40}
+\end{equation}
+这里采用中心差分而不是一阶向前差分，是为了消除背景二次项带来的
+$\mathcal{O}(\varepsilon/\sigma^2)$ 截断偏差。对于动量分量，
+$\sigma_m=0.005$，这一偏差在向前差分中会比较明显。
+
+默认运行抽取 $24$ 个分量，覆盖 $h,hu,hv$ 三类变量。当前结果为
+\[
+\frac{\|\nabla J_{\mathrm{adj}}-\nabla J_{\mathrm{FD}}\|_2}
+     {\|\nabla J_{\mathrm{FD}}\|_2}
+=1.64\times 10^{-7},
+\qquad
+\mathrm{corr}(\nabla J_{\mathrm{adj}},\nabla J_{\mathrm{FD}})=1.000000000000.
+\]
+最大绝对差异为 $1.03\times 10^{-4}$，出现在一个 $h$ 分量上。
+图~\ref{fig:fd-adjoint-components} 给出了伴随梯度与中心有限差分梯度的散点、逐分量叠加以及误差图。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.95\textwidth]{var_output/fd_adjoint_components.png}
+    \caption{抽样控制分量上的中心有限差分与离散伴随梯度对比。该图比单一方向 Taylor 检验更容易暴露变量分量或索引映射错误。}
+    \label{fig:fd-adjoint-components}
+\end{figure}
+
 \section{两条路线的关系}
 
 这两条路线并不是互相排斥的。更准确地说：
@@ -880,13 +914,14 @@ $1-|\Phi(\varepsilon)|$，因此理想极限是 $0$；右图画的是 Taylor 余
 
 \section{建议的后续实现路线}
 
-如果下一步要把 VarDA 真正接进当前项目，一个务实的实现顺序是：
+当前代码已经完成了基本离散伴随实现、Taylor 检验和抽样逐分量检验。
+如果下一步要继续提高这份 VarDA 原型，一个务实的实现顺序是：
 \begin{enumerate}
-\item 从单个确定性前向模式开始，不考虑集合，先做一个最基本的 4D-Var；
-\item 暂时只同化水深 $h$ 观测，保持与现有观测网络一致；
-\item 先实现离散切线性和离散伴随，并用有限差分做梯度检验；
-\item 梯度检验通过后，再接入 L-BFGS 或共轭梯度等优化器；
-\item 最后再考虑加入更复杂背景协方差或更多物理项。
+\item 将 Taylor 检验和抽样逐分量检验固定为回归测试，覆盖不同网格、观测网络和初值扰动；
+\item 将优化器从预条件最速下降升级为 L-BFGS 或共轭梯度；
+\item 为长窗口或高分辨率网格加入检查点重计算，减少保存完整轨迹的内存代价；
+\item 在当前对角背景协方差之外，引入空间相关背景误差模型；
+\item 最后再考虑更多观测类型、质量控制和混合集合--变分扩展。
 \end{enumerate}
 
 \section{数值验证：当前 4D-Var 原型的行为}
@@ -988,7 +1023,7 @@ J = J_b + \sum_{k=1}^{30} J_k^{\mathrm{obs}},
 
 \subsection{这一节验证了什么}
 
-对当前这份 4D-Var 原型，以上数值结果至少说明了三件事。第一，离散伴随驱动的梯度下降在数值上是工作的，因为总代价函数能够稳定下降。第二，优化后的轨道相对于背景轨道有显著改进，说明反传得到的初值梯度方向具有正确的物理信息。第三，若考察的是逐周期 misfit，就必须区分"全局目标单调下降"和"局部观测项逐次下降"这两个不同概念；对单窗口 4D-Var 来说，后者本来就不应被当作必需性质。
+对当前这份 4D-Var 原型，以上数值结果至少说明了四件事。第一，离散伴随梯度通过 Taylor 检验和抽样逐分量中心差分检验，说明反向传播与前向离散在数值上是一致的。第二，离散伴随驱动的梯度下降在数值上是工作的，因为总代价函数能够稳定下降。第三，优化后的轨道相对于背景轨道有显著改进，说明反传得到的初值梯度方向具有正确的物理信息。第四，若考察的是逐周期 misfit，就必须区分"全局目标单调下降"和"局部观测项逐次下降"这两个不同概念；对单窗口 4D-Var 来说，后者本来就不应被当作必需性质。
 
 \section{结论}
 

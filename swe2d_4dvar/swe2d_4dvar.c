@@ -36,6 +36,9 @@
 #define VAR_ALPHA_SHRINK  0.5
 #define VAR_ALPHA_GROW    2.0
 
+#define FD_COMPONENT_SAMPLES 24
+#define FD_COMPONENT_EPS     1.0e-6
+
 #define OUT_DIR "var_output"
 
 typedef struct {
@@ -563,6 +566,41 @@ static double field_dot(const Field *A, const Field *B, int ncell)
 static double field_norm(const Field *A, int ncell)
 {
   return sqrt(field_dot(A, A, ncell));
+}
+
+static double get_component(const Field *U, int component, int ncell)
+{
+  if (component < ncell) return U->h[component];
+  if (component < 2 * ncell) return U->hu[component - ncell];
+  return U->hv[component - 2 * ncell];
+}
+
+static void set_component(Field *U, int component, int ncell, double value)
+{
+  if (component < ncell) U->h[component] = value;
+  else if (component < 2 * ncell) U->hu[component - ncell] = value;
+  else U->hv[component - 2 * ncell] = value;
+}
+
+static double get_gradient_component(const Field *grad, int component, int ncell)
+{
+  if (component < ncell) return grad->h[component];
+  if (component < 2 * ncell) return grad->hu[component - ncell];
+  return grad->hv[component - 2 * ncell];
+}
+
+static const char *component_variable_name(int component, int ncell)
+{
+  if (component < ncell) return "h";
+  if (component < 2 * ncell) return "hu";
+  return "hv";
+}
+
+static int component_cell_index(int component, int ncell)
+{
+  if (component < ncell) return component;
+  if (component < 2 * ncell) return component - ncell;
+  return component - 2 * ncell;
 }
 
 static void field_axpy(Field *Y, double a, const Field *X, int ncell)
@@ -1101,6 +1139,66 @@ int main(void)
       free_field(&xp);
     }
     if (taylor_fp) fclose(taylor_fp);
+
+    {
+      FILE *component_fp = fopen(OUT_DIR "/fd_adjoint_components.csv", "w");
+      if (!component_fp) {
+        fprintf(stderr, "warning: cannot open component FD/adjoint check output\n");
+      } else {
+        J0 = evaluate_cost_gradient(&analysis0, &background0, &grid, obs_idx, obs,
+                                    an_traj, stage, &qtmp, &lam_curr, &lam_prev,
+                                    &lam_work, &grad, NULL, NULL,
+                                    nsteps_total, dt, SIGMA_H0, SIGMA_M0, OBS_STD);
+        fprintf(component_fp,
+                "sample,component,variable,cell,i,j,epsilon,adjoint,finite_difference,difference,relative_difference\n");
+        for (int s = 0; s < FD_COMPONENT_SAMPLES; ++s) {
+          int component = (FD_COMPONENT_SAMPLES == 1)
+            ? 0
+            : (int)(((long long)s * (3LL * ncell - 1LL)) / (FD_COMPONENT_SAMPLES - 1LL));
+          int cell = component_cell_index(component, ncell);
+          int i = cell % grid.nx;
+          int j = cell / grid.nx;
+          const char *var = component_variable_name(component, ncell);
+          double adj = get_gradient_component(&grad, component, ncell);
+          double old_value;
+          double Jp, Jm, fd, diff, denom;
+          Field xp = {NULL, NULL, NULL};
+          Field xm = {NULL, NULL, NULL};
+
+          if (!allocate_field(&xp, ncell) || !allocate_field(&xm, ncell)) {
+            fprintf(stderr, "component FD check allocation failed\n");
+            free_field(&xp);
+            free_field(&xm);
+            fclose(component_fp);
+            free(dir);
+            goto cleanup;
+          }
+          copy_field(&xp, &analysis0, ncell);
+          copy_field(&xm, &analysis0, ncell);
+          old_value = get_component(&xp, component, ncell);
+          set_component(&xp, component, ncell, old_value + FD_COMPONENT_EPS);
+          set_component(&xm, component, ncell, old_value - FD_COMPONENT_EPS);
+          Jp = evaluate_cost_gradient(&xp, &background0, &grid, obs_idx, obs,
+                                      an_traj, stage, &qtmp, &lam_curr, &lam_prev,
+                                      &lam_work, &grad, NULL, NULL,
+                                      nsteps_total, dt, SIGMA_H0, SIGMA_M0, OBS_STD);
+          Jm = evaluate_cost_gradient(&xm, &background0, &grid, obs_idx, obs,
+                                      an_traj, stage, &qtmp, &lam_curr, &lam_prev,
+                                      &lam_work, &grad, NULL, NULL,
+                                      nsteps_total, dt, SIGMA_H0, SIGMA_M0, OBS_STD);
+          fd = (Jp - Jm) / (2.0 * FD_COMPONENT_EPS);
+          diff = adj - fd;
+          denom = fabs(fd) > 1.0e-14 ? fabs(fd) : 1.0;
+          fprintf(component_fp,
+                  "%d,%d,%s,%d,%d,%d,%.12e,%.16e,%.16e,%.16e,%.16e\n",
+                  s, component, var, cell, i, j, FD_COMPONENT_EPS,
+                  adj, fd, diff, fabs(diff) / denom);
+          free_field(&xp);
+          free_field(&xm);
+        }
+        fclose(component_fp);
+      }
+    }
     free(dir);
   }
 
