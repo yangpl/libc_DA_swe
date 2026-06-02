@@ -18,6 +18,7 @@ METRICS_FILE = os.path.join(DATA_DIR, "trajectory_metrics.csv")
 COST_FILE = os.path.join(DATA_DIR, "cost_history.csv")
 MISFIT_FILE = os.path.join(DATA_DIR, "iter_cycle_misfit.csv")
 OBS_CONFIG_FILE = os.path.join(DATA_DIR, "obs_config.csv")
+FD_ADJOINT_FILE = os.path.join(DATA_DIR, "fd_adjoint_check.csv")
 
 FIELD_NAME = "h"
 MAKE_MOVIE = True
@@ -27,6 +28,8 @@ OUTPUT_MOVIE_BASENAME = os.path.join(DATA_DIR, "var_4d_result")
 OUTPUT_METRICS_FIG = os.path.join(DATA_DIR, "var_4d_metrics.png")
 OUTPUT_SNAPSHOT_FIG = os.path.join(DATA_DIR, "var_4d_snapshots.png")
 OUTPUT_MISFIT_FIG = os.path.join(DATA_DIR, "var_4d_cycle_misfit.png")
+OUTPUT_FINAL_FRAME_FIG = os.path.join(DATA_DIR, "var_4d_final_frame.png")
+OUTPUT_FD_ADJOINT_FIG = os.path.join(DATA_DIR, "fd_adjoint_check.png")
 
 FIELD_CMAP = "YlGnBu"
 ERROR_CMAP = "RdBu_r"
@@ -113,6 +116,8 @@ if not os.path.exists(COST_FILE):
     raise RuntimeError(f"Missing cost history file: {COST_FILE}")
 if not os.path.exists(MISFIT_FILE):
     raise RuntimeError(f"Missing cycle misfit file: {MISFIT_FILE}")
+if not os.path.exists(FD_ADJOINT_FILE):
+    raise RuntimeError(f"Missing FD/adjoint check file: {FD_ADJOINT_FILE}")
 
 metrics = np.genfromtxt(METRICS_FILE, delimiter=",", names=True)
 if metrics.ndim == 0:
@@ -125,6 +130,10 @@ if cost_hist.ndim == 0:
 misfit_hist = np.genfromtxt(MISFIT_FILE, delimiter=",", names=True)
 if misfit_hist.ndim == 0:
     misfit_hist = np.array([misfit_hist], dtype=misfit_hist.dtype)
+
+fd_adjoint = np.genfromtxt(FD_ADJOINT_FILE, delimiter=",", names=True)
+if fd_adjoint.ndim == 0:
+    fd_adjoint = np.array([fd_adjoint], dtype=fd_adjoint.dtype)
 
 obs_config = load_optional_obs_config(OBS_CONFIG_FILE)
 
@@ -397,9 +406,42 @@ def save_cycle_misfit_figure():
     plt.close(fig)
 
 
+def save_fd_adjoint_figure():
+    eps = np.atleast_1d(fd_adjoint["epsilon"]).astype(float)
+    fd_dir = np.atleast_1d(fd_adjoint["fd_directional"]).astype(float)
+    adj_dir = np.atleast_1d(fd_adjoint["adjoint_directional"]).astype(float)
+    phi = fd_dir / adj_dir
+    ratio_error = 1.0 - np.abs(phi)
+    residual = np.atleast_1d(fd_adjoint["taylor_residual"]).astype(float)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.8), constrained_layout=True)
+    ax_ratio = axes[0]
+    ax_residual = axes[1]
+
+    ax_ratio.axhline(0.0, color="#222222", lw=1.2, ls="--")
+    ax_ratio.semilogx(eps, ratio_error, "-o", color="#006d77", lw=2.4, ms=6)
+    ax_ratio.set_title(r"Gradient Test Ratio")
+    ax_ratio.set_xlabel(r"$\epsilon$")
+    ax_ratio.set_ylabel(r"$1 - |\Phi(\epsilon)|$")
+    ax_ratio.invert_xaxis()
+    ax_ratio.grid(True, alpha=0.5)
+
+    ax_residual.loglog(eps, residual, "-o", color="#7c2d12", lw=2.4, ms=6)
+    ax_residual.set_title("Taylor Remainder")
+    ax_residual.set_xlabel(r"$\epsilon$")
+    ax_residual.set_ylabel(r"$|J(x+\epsilon d)-J(x)-\epsilon \nabla J^T d|$")
+    ax_residual.invert_xaxis()
+    ax_residual.grid(True, which="both", alpha=0.5)
+
+    fig.suptitle("Finite-Difference Check Of The Discrete Adjoint", fontsize=14, fontweight="bold")
+    fig.savefig(OUTPUT_FD_ADJOINT_FIG, dpi=180, bbox_inches="tight", transparent=True)
+    plt.close(fig)
+
+
 save_metrics_figure()
 save_snapshot_figure()
 save_cycle_misfit_figure()
+save_fd_adjoint_figure()
 
 fig = plt.figure(figsize=(18, 10), constrained_layout=True)
 mosaic = [
@@ -557,8 +599,14 @@ if MAKE_MOVIE:
     except Exception as exc:
         print("MP4 save failed:", exc)
         print("Trying GIF instead...")
-        animation.save(f"{OUTPUT_MOVIE_BASENAME}.gif", writer="pillow", fps=FPS)
-        print(f"Saved {OUTPUT_MOVIE_BASENAME}.gif")
+        try:
+            animation.save(f"{OUTPUT_MOVIE_BASENAME}.gif", writer="pillow", fps=FPS)
+            print(f"Saved {OUTPUT_MOVIE_BASENAME}.gif")
+        except Exception as gif_exc:
+            print("GIF save failed:", gif_exc)
+            update(len(cycles) - 1)
+            fig.savefig(OUTPUT_FINAL_FRAME_FIG, dpi=180, bbox_inches="tight", transparent=True)
+            print(f"Saved final frame to {OUTPUT_FINAL_FRAME_FIG}")
 else:
     for frame in range(len(cycles)):
         update(frame)

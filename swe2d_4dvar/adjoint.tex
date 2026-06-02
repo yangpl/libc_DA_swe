@@ -4,12 +4,14 @@
 
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{fancyhdr}
 
 \hypersetup{colorlinks,linkcolor=blue,citecolor=blue,urlcolor=blue}
 \setlength{\headheight}{15pt}
+\setlength{\emergencystretch}{3em}
 
 \pagestyle{fancy}
 \fancyhf{}
@@ -165,7 +167,7 @@ H_k := \mathcal{H}_k'(\mathbf{q}(t_k)).
 \begin{equation}
 \mathcal{L}
 = J(\mathbf{q}_0)
-+ \int_0^T\!\!\int_{\Omega}
+- \int_0^T\!\!\int_{\Omega}
 \bm{\lambda}^{\mathsf T}
 \left(
 \frac{\partial \mathbf{q}}{\partial t}
@@ -174,6 +176,9 @@ H_k := \mathcal{H}_k'(\mathbf{q}(t_k)).
 \right)\, d\Omega\, dt.
 \label{eq:eq8}
 \end{equation}
+这里选择负号，是为了让本文的伴随变量与代码中的变量
+\texttt{lam\_curr} 采用同一符号约定：观测残差的梯度以正号注入伴随，
+最终梯度为背景项梯度加上初值伴随。
 
 下面给出从 \eqref{eq:eq8} 到连续伴随方程 \eqref{eq:eq9} 的逐步推导。最优性条件 $\delta\mathcal{L}=0$ 将产生三类结果：伴随 PDE（控制 $\bm{\lambda}$ 在时间窗内部的反向演化）、终端与跳跃条件（确定 $\bm{\lambda}$ 在 $t=T$ 和观测时刻的取值），以及初值梯度公式。下面按"变分→分部积分→收集系数"的顺序展开。
 
@@ -187,7 +192,7 @@ H_k := \mathcal{H}_k'(\mathbf{q}(t_k)).
 其中 $H_k = \mathcal{H}_k'(\mathbf{q}(t_k))$ 是观测算子的线性化。
 
 \medskip
-\noindent\textbf{Step 2: 约束项的变分。}利用 $\delta\mathbf{f}=A\,\delta\mathbf{q}$ 与 $\delta\mathbf{g}=B\,\delta\mathbf{q}$，
+\noindent\textbf{Step 2: 约束项的变分。}利用 $\delta\mathbf{f}=A\,\delta\mathbf{q}$ 与 $\delta\mathbf{g}=B\,\delta\mathbf{q}$，先写出约束积分本身的一阶变分：
 \[
 \delta\!\int_0^T\!\!\int_{\Omega} \bm{\lambda}^{\mathsf T}
 \Bigl(
@@ -221,7 +226,7 @@ H_k := \mathcal{H}_k'(\mathbf{q}(t_k)).
 \]
 
 \medskip
-\noindent\textbf{Step 4: 代回最优性条件 $\delta\mathcal{L}=0$。}暂先假设空间边界项
+\noindent\textbf{Step 4: 代回最优性条件 $\delta\mathcal{L}=0$。}由于 \eqref{eq:eq8} 中约束项前面取负号，代回时需要把 Step 3 的分部积分结果整体取负。暂先假设空间边界项
 \[
 \int_{\partial\Omega} \bm{\lambda}^{\mathsf T} A\,\delta\mathbf{q}\; n_x\,dS = 0,
 \qquad
@@ -230,14 +235,14 @@ H_k := \mathcal{H}_k'(\mathbf{q}(t_k)).
 在合适的边界条件下成立（离散情况下的对应处理见第 \ref{sec:bc-adjoint} 节），则
 \begin{multline*}
 \delta\mathcal{L}
-= \bigl[(\mathbf{q}_0-\mathbf{q}_b)^{\mathsf T} B_0^{-1} - \bm{\lambda}(0^+)^{\mathsf T}\bigr]\delta\mathbf{q}_0
-+ \bm{\lambda}(T^+)^{\mathsf T}\delta\mathbf{q}(T) \\
+= \bigl[(\mathbf{q}_0-\mathbf{q}_b)^{\mathsf T} B_0^{-1} + \bm{\lambda}(0^+)^{\mathsf T}\bigr]\delta\mathbf{q}_0
+- \bm{\lambda}(T^+)^{\mathsf T}\delta\mathbf{q}(T) \\
 + \sum_{k} \bigl(H_k\mathbf{q}(t_k)-\mathbf{y}_k\bigr)^{\mathsf T} R_k^{-1} H_k\,\delta\mathbf{q}(t_k) \\
 + \int_0^T\!\!\int_{\Omega}
 \Bigl[
--\frac{\partial\bm{\lambda}^{\mathsf T}}{\partial t}
-- \frac{\partial}{\partial x}\bigl(\bm{\lambda}^{\mathsf T}A\bigr)
-- \frac{\partial}{\partial y}\bigl(\bm{\lambda}^{\mathsf T}B\bigr)
+\frac{\partial\bm{\lambda}^{\mathsf T}}{\partial t}
++ \frac{\partial}{\partial x}\bigl(\bm{\lambda}^{\mathsf T}A\bigr)
++ \frac{\partial}{\partial y}\bigl(\bm{\lambda}^{\mathsf T}B\bigr)
 \Bigr]\delta\mathbf{q}\;d\Omega\,dt.
 \end{multline*}
 
@@ -254,18 +259,18 @@ H_k := \mathcal{H}_k'(\mathbf{q}(t_k)).
 \]
 这里 $A(\mathbf{q})$ 和 $B(\mathbf{q})$ 通过 $\mathbf{q}$ 依赖于 $(x,y,t)$，因此 $\partial A/\partial x$ 和 $\partial B/\partial y$ 一般不为零。变分同化中常用的\textbf{冻结系数近似}忽略这两项，即沿非线性轨道视 $A,B$ 为局部常数。这样体积分系数简化为
 \[
--\frac{\partial\bm{\lambda}}{\partial t}
-- A^{\mathsf T}\frac{\partial\bm{\lambda}}{\partial x}
-- B^{\mathsf T}\frac{\partial\bm{\lambda}}{\partial y}.
+\frac{\partial\bm{\lambda}}{\partial t}
++ A^{\mathsf T}\frac{\partial\bm{\lambda}}{\partial x}
++ B^{\mathsf T}\frac{\partial\bm{\lambda}}{\partial y}.
 \]
 这一近似的意义在于：它使伴随 PDE 保持与正向 PDE 相同的双曲型结构（仅时间方向反向），便于数值离散；但其代价是连续伴随不再是对原始离散模式的精确转置——这正是路线二（先离散再求伴随）存在价值的原因。
 
 \medskip
 \noindent\textbf{Step 6: 导出伴随 PDE。}由于 $\delta\mathbf{q}$ 在 $t\in(0,T)$ 内部任意，$\delta\mathcal{L}=0$ 要求该系数处处为零，即得到连续伴随方程
 \begin{equation}
--\frac{\partial \bm{\lambda}}{\partial t}
-- A(\mathbf{q})^{\mathsf T}\frac{\partial \bm{\lambda}}{\partial x}
-- B(\mathbf{q})^{\mathsf T}\frac{\partial \bm{\lambda}}{\partial y}
+\frac{\partial \bm{\lambda}}{\partial t}
++ A(\mathbf{q})^{\mathsf T}\frac{\partial \bm{\lambda}}{\partial x}
++ B(\mathbf{q})^{\mathsf T}\frac{\partial \bm{\lambda}}{\partial y}
 = 0,
 \qquad t\in (t_{k-1},t_k).
 \label{eq:eq9}
@@ -300,7 +305,7 @@ T \to t_{N_{\mathrm{obs}}} \to \cdots \to t_1 \to 0.
 做完反向积分后，代价函数对初值的梯度为
 \begin{equation}
 \nabla_{\mathbf{q}_0} J
-= B_0^{-1}(\mathbf{q}_0-\mathbf{q}_b) - \bm{\lambda}(0^+).
+= B_0^{-1}(\mathbf{q}_0-\mathbf{q}_b) + \bm{\lambda}(0^+).
 \label{eq:eq12}
 \end{equation}
 这正是 4D-Var 最核心的输出：一旦给定前向轨道，就可以用一次伴随积分把所有观测对初值的灵敏度压缩成一个梯度向量。
@@ -309,7 +314,7 @@ T \to t_{N_{\mathrm{obs}}} \to \cdots \to t_1 \to 0.
 
 "先求伴随再离散"的优点是理论结构清楚：
 \begin{itemize}
-\item 它直接解释了为什么梯度等于"背景项减去初始伴随"；
+\item 它直接解释了为什么梯度等于"背景项加上初始伴随"；
 \item 它直接给出观测残差如何作为源项注入伴随系统；
 \item 它适合讨论边界条件、正则化项和连续最优性条件。
 \end{itemize}
@@ -469,7 +474,7 @@ $a$ 对各守恒变量的偏导数为
 \end{itemize}
 在切换点 $a_L = a_R$ 处导数不存在。但由于该集合在状态空间中为零测集（实际计算几乎不会精确落在分支边界上），且两分支内均可单独定义导数，因此这一不可导性在应用中通常可忽略——只需在分支边界处任取一侧的次梯度即可。
 
-\subsubsection{冻结耗散近似}
+\subsubsection{耗散速度导数的实现选择}
 
 工程上通常采用以下两种策略处理 $\nabla s$ 的非光滑性：
 \begin{itemize}
@@ -483,7 +488,7 @@ $a$ 对各守恒变量的偏导数为
 \widehat{F}_R \approx \frac12 A(\mathbf{q}_R) - \frac12 s I.
 \label{eq:eq25}
 \end{equation}
-该近似等价于假定 Riemann 问题的耗散结构在邻域内不随状态变化，在非线性不强的浅水波问题中通常足够准确。当前 \texttt{swe2d\_4dvar.c} 采用的正是这一近似：\texttt{rusanov\_x\_jacobians} 函数中虽计算了 $\nabla s$ 但仅从最大速度一侧生效，本质上等同于 \eqref{eq:eq25}。
+该近似等价于假定 Riemann 问题的耗散结构在邻域内不随状态变化，在非线性不强的浅水波问题中通常足够准确。不过当前 \texttt{swe2d\_4dvar.c} 并未采用冻结耗散近似，而是采用\textbf{分段导数}：\texttt{rusanov\_x\_jacobians()} 与 \texttt{rusanov\_y\_jacobians()} 先计算两侧速度 $a_L,a_R$，再只对达到最大值的一侧保留 $\nabla s$。因此代码实现对应的是 \eqref{eq:eq22}--\eqref{eq:eq23} 的分支形式；只有在显式丢弃外积项时才退化为 \eqref{eq:eq25}。
 
 \subsection{一步 Euler 的离散伴随}
 
@@ -587,19 +592,25 @@ lam_in->hv[k] += v[2];
 \end{aligned}
 \]
 
-在 \texttt{euler\_adjoint()} 中，这四个界面 Jacobian 的转置乘法利用辅助函数 \texttt{add\_matT\_vec\_to\_cell()} 实现：给定一个 $3\times3$ Jacobian 矩阵 $J$ 和一个三维向量 $\mathbf{v}$，该函数计算
+在 \texttt{euler\_adjoint()} 中，这四个界面 Jacobian 的转置乘法通过辅助函数 \texttt{add\_matT\_vec\_to\_cell()} 实现。给定一个 $3\times3$ Jacobian 矩阵 $J$ 和一个三维向量 $\mathbf{v}$，该函数计算
 \[
 \mathrm{cell} \mathrel{+}= J^{\mathsf T}\mathbf{v},
 \]
 正好对应上面五个段落中的 $\widehat{F}_L^{\mathsf T}\bm{\lambda}^+$ 等形式。最后，$\bm{\lambda}_{i,j}$ 的完整更新是以上五项的和：
-\[
+\begin{align*}
 \bm{\lambda}_{i,j}
-= \bm{\lambda}^+_{i,j}
-- \frac{\Delta t}{\Delta x}\bigl(\widehat{F}_{R,(i,j)}^{\mathsf T}+\widehat{F}_{L,(i,j)}^{\mathsf T}\bigr)\bm{\lambda}^+_{i,j}
-+ \frac{\Delta t}{\Delta x}\widehat{F}_{R,(i-1,j)}^{\mathsf T}\bm{\lambda}^+_{i-1,j}
-- \frac{\Delta t}{\Delta y}\bigl(\widehat{G}_{T,(i,j)}^{\mathsf T}+\widehat{G}_{B,(i,j)}^{\mathsf T}\bigr)\bm{\lambda}^+_{i,j}
-+ \frac{\Delta t}{\Delta y}\widehat{G}_{T,(i,j-1)}^{\mathsf T}\bm{\lambda}^+_{i,j-1},
-\]
+= {}& \bm{\lambda}^+_{i,j}
+- \frac{\Delta t}{\Delta x}
+\bigl(\widehat{F}_{R,(i,j)}^{\mathsf T}
++\widehat{F}_{L,(i,j)}^{\mathsf T}\bigr)\bm{\lambda}^+_{i,j} \\
+&+ \frac{\Delta t}{\Delta x}\widehat{F}_{R,(i-1,j)}^{\mathsf T}
+\bm{\lambda}^+_{i-1,j}
+- \frac{\Delta t}{\Delta y}
+\bigl(\widehat{G}_{T,(i,j)}^{\mathsf T}
++\widehat{G}_{B,(i,j)}^{\mathsf T}\bigr)\bm{\lambda}^+_{i,j} \\
+&+ \frac{\Delta t}{\Delta y}\widehat{G}_{T,(i,j-1)}^{\mathsf T}
+\bm{\lambda}^+_{i,j-1},
+\end{align*}
 其中 $\widehat{F}_{R,(i,j)}$ 表示界面 $(i+1/2,j)$ 对右状态 $\mathbf{q}_{i+1,j}$ 的 Jacobian，$\widehat{F}_{L,(i,j)}$ 表示同一界面对左状态 $\mathbf{q}_{i,j}$ 的 Jacobian，余类推。这一分解把 \eqref{eq:eq29} 中抽象的 $I+J_{i,j;r,s}$ 展开成了代码中具体可见的四对界面调用。
 
 这个逐项分解的核心思想也正是 \texttt{swe.tex} 中强调的：\textbf{每一个前向操作（差分、平均、最大值选取）都有一个对应的转置累加操作}。对当前有限体积框架而言，"离散伴随"就是遍历所有界面通量的依赖关系，把 $\widehat{F}_L$、$\widehat{F}_R$ 的转置以符号正确的系数累加到参与单元的伴随变量上。
@@ -684,9 +695,84 @@ H_{n_k}^{\mathsf T} R_{n_k}^{-1}
 \begin{equation}
 \nabla_{\mathbf{Q}^0} J
 =
-B_0^{-1}(\mathbf{Q}^0-\mathbf{Q}_b) - \bm{\Lambda}^{0}.
+B_0^{-1}(\mathbf{Q}^0-\mathbf{Q}_b) + \bm{\Lambda}^{0}.
 \label{eq:eq35}
 \end{equation}
+
+\section{当前程序的实现结构}
+
+\texttt{../swe2d\_4dvar\_package/swe2d\_4dvar\_report.tex} 对一个相近的 4D-Var 演示程序给出了清晰的软件说明，但那份程序采用低维控制向量和有限差分梯度；当前目录中的 \texttt{swe2d\_4dvar.c} 已经转向全初值控制和离散伴随梯度。因此本文只借鉴其"模型--同化--输出--验证"的组织方式，而不沿用其中的有限差分梯度公式作为当前实现说明。
+
+\subsection{核心函数与数学对象的对应}
+
+当前程序全部位于单个 C 文件中。与本文推导对应的关键函数如下：
+\begin{itemize}
+\item \texttt{flux\_x()}, \texttt{flux\_y()}：计算物理通量 $\mathbf{f}$ 和 $\mathbf{g}$；
+\item \texttt{rusanov\_x()}, \texttt{rusanov\_y()}：计算 Rusanov 数值通量；
+\item \texttt{rusanov\_x\_jacobians()}, \texttt{rusanov\_y\_jacobians()}：计算界面通量对左右状态的 Jacobian，即 \eqref{eq:eq22}--\eqref{eq:eq23} 及其 $y$ 方向对应式；
+\item \texttt{euler\_update()}：实现 \eqref{eq:eq14} 的前向 Euler 子步；
+\item \texttt{step\_rk2\_store()}：执行两次 Euler 子步并保存 $\mathbf{Q}^{(1)}$，对应 \eqref{eq:eq15}；
+\item \texttt{euler\_adjoint()}：实现 Euler 子步 Jacobian 的转置累加，对应 \eqref{eq:eq29}；
+\item \texttt{rk2\_adjoint\_step()}：按 \eqref{eq:eq31}--\eqref{eq:eq33} 反传 RK2；
+\item \texttt{obs\_gradient\_add()}：把 $H^\mathsf{T}R^{-1}(H\mathbf{Q}-\mathbf{y})$ 注入伴随变量；
+\item \texttt{evaluate\_cost\_gradient()}：一次完成前向轨道保存、代价函数计算、反向伴随积分和初值梯度组装；
+\item \texttt{line\_search\_two\_way()}：使用 Armijo 条件和曲率条件选择步长。
+\end{itemize}
+
+\subsection{默认参数}
+
+当前默认配置见表 \ref{tab:current-params}。这些参数对应 \texttt{swe2d\_4dvar.c} 中的宏定义，而不是相邻 package 报告中的 $36\times36$、低维控制配置。
+
+\begin{table}[htbp]
+\centering
+\caption{当前 \texttt{swe2d\_4dvar.c} 的默认配置}
+\label{tab:current-params}
+\begin{tabular}{lcc}
+\toprule
+参数 & 记号 & 默认值 \\
+\midrule
+网格规模 & $N_x\times N_y$ & $60\times60$ \\
+空间区域 & $L_x\times L_y$ & $1\times1$ \\
+观测点数 & $N_{\mathrm{obs}}$ & $16$ \\
+观测周期数 & $N_{\mathrm{cycles}}$ & $30$ \\
+单周期窗口长度 & $\Delta T$ & $0.04$ \\
+每周期 RK2 步数 & $N_{\mathrm{step}}$ & $20$ \\
+固定时间步长 & $\Delta t$ & $0.002$ \\
+观测误差标准差 & $\sigma_o$ & $0.01$ \\
+背景水深标准差 & $\sigma_h$ & $0.02$ \\
+背景动量标准差 & $\sigma_m$ & $0.005$ \\
+最大优化迭代数 & $N_{\max}$ & $12$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{输出文件}
+
+程序运行后写入 \texttt{var\_output/}。其中最重要的诊断文件包括：
+\begin{itemize}
+\item \texttt{cost\_history.csv}：每次优化迭代的总代价、梯度范数和接受步长；
+\item \texttt{iter\_cycle\_misfit.csv}：每次迭代、每个观测周期的观测项代价和观测 RMS；
+\item \texttt{trajectory\_metrics.csv}：背景轨道和分析轨道相对于真值的水深 RMSE；
+\item \texttt{truth\_cycle*.csv}, \texttt{background\_cycle*.csv}, \texttt{analysis\_cycle*.csv}：各输出时刻的格点场；
+\item \texttt{obs\_config.csv}：观测点所在网格单元。
+\end{itemize}
+
+\subsection{优化算法}
+
+当前优化器不是相邻 package 报告中的有限差分最速下降。它先利用离散伴随得到全状态梯度，再用对角背景方差作为预条件，令
+\[
+\mathbf{p}
+= -\operatorname{diag}(\sigma_h^2,\sigma_m^2,\sigma_m^2)\,\nabla J.
+\]
+之后执行带有 Armijo 充分下降和弱 Wolfe 型曲率检查的线搜索：
+\[
+J(\mathbf{Q}^0+\alpha\mathbf{p})
+\le J(\mathbf{Q}^0) + c_1\alpha\,\nabla J^\mathsf{T}\mathbf{p},
+\qquad
+\nabla J(\mathbf{Q}^0+\alpha\mathbf{p})^\mathsf{T}\mathbf{p}
+\ge c_2\,\nabla J^\mathsf{T}\mathbf{p}.
+\]
+其中 $c_1=10^{-4}$，$c_2=0.9$。这比单纯回溯更稳健，因为它不仅要求目标函数下降，也避免接受过短且曲率信息不合理的步长。
 
 \section{与当前代码对接时必须说明的关键问题}
 
@@ -752,7 +838,35 @@ J(\mathbf{Q}^0 + \varepsilon\,\delta\mathbf{Q}^0)
 \]
 且数值上随 $\varepsilon$ 减半，比值应趋近于 $1$ 的收敛速度接近 $\mathcal{O}(\varepsilon)$（受有限差分截断误差限制）。
 
-当前代码中的 \texttt{swe2d\_4dvar.c} 没有内置梯度检验例程（4D-Var 优化本身已间接验证梯度的可用性），但在开发阶段建议单写一个 \texttt{gradient\_test.c} 或利用 Python 脚本 \texttt{plot\_4dvar\_result.py} 的接口，在每次迭代前用随机方向做一次梯度检验，以确保离散伴随的转置关系没有因代码修改而破坏。
+当前代码已经在主程序启动后执行 Taylor 检验。一次典型运行的输出为
+\begin{center}
+\small
+$
+\begin{array}{c|ccccc}
+\varepsilon & 10^{-1} & 10^{-2} & 10^{-3} & 10^{-4} & 10^{-5} \\
+\hline
+\mathrm{Taylor\ residual}
+& 1.3782\times10^2 & 1.3782 & 1.3782\times10^{-2}
+& 1.3782\times10^{-4} & 1.3782\times10^{-6}
+\end{array}
+$
+\end{center}
+其中 $\mathrm{Taylor\ residual}$ 表示
+\[
+\left|J(\mathbf{Q}^0+\varepsilon\delta\mathbf{Q}^0)-J(\mathbf{Q}^0)
+-\varepsilon\langle\nabla J,\delta\mathbf{Q}^0\rangle\right|.
+\]
+误差随 $\varepsilon$ 每缩小 $10$ 倍而约缩小 $100$ 倍，呈现二阶 Taylor 余项行为。这是比"优化过程能下降"更直接的离散伴随验证，因为它检验的是梯度方向导数本身。
+
+图 \ref{fig:fd-adjoint-check} 将同一检验可视化。左图画的是上式定义的
+$1-|\Phi(\varepsilon)|$，因此理想极限是 $0$；右图画的是 Taylor 余项。当前结果显示，较大的扰动会受到非线性项影响，$1-|\Phi|$ 不必接近零；当 $\varepsilon$ 减小到 $10^{-5}$ 时，$\Phi$ 已接近 $1$，$1-|\Phi|$ 约为 $6.7\times10^{-3}$。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.9\textwidth]{var_output/fd_adjoint_check.png}
+    \caption{有限差分方向导数与离散伴随方向导数的梯度检验。左图为 $1-|\Phi(\varepsilon)|$，右图为 Taylor 余项。}
+    \label{fig:fd-adjoint-check}
+\end{figure}
 
 \section{两条路线的关系}
 
@@ -819,11 +933,11 @@ J(\mathbf{Q}^0 + \varepsilon\,\delta\mathbf{Q}^0)
 \]
 而 4D-Var 轨道 RMSE 约为
 \[
-8.6723\times 10^{-5},
+8.6937\times 10^{-5},
 \]
 绝对改进约为
 \[
-1.2914\times 10^{-3}.
+1.2912\times 10^{-3}.
 \]
 
 \begin{figure}[htbp]

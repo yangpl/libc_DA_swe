@@ -711,7 +711,7 @@ static void write_field_csv(const char *filename, const Field *U,
   fclose(fp);
 }
 
-static void write_obs_config(const int *obs_idx, int m)
+static void write_obs_config(const int *obs_idx, int m, const Grid *grid)
 {
   char path[256];
   FILE *fp;
@@ -722,8 +722,8 @@ static void write_obs_config(const int *obs_idx, int m)
 
   fprintf(fp, "p,cell_index,i,j\n");
   for (int p = 0; p < m; ++p) {
-    int i = obs_idx[p] % NX;
-    int j = obs_idx[p] / NX;
+    int i = obs_idx[p] % grid->nx;
+    int j = obs_idx[p] / grid->nx;
     fprintf(fp, "%d,%d,%d,%d\n", p, obs_idx[p], i, j);
   }
   fclose(fp);
@@ -926,19 +926,28 @@ int main(void)
   int obs_idx[NOBS];
   double *obs = NULL;
   Rng rng_init, rng_obs;
-  Field truth0, background0, analysis0, trial0;
-  Field grad, trial_grad, direction, truth_tmp;
-  Field lam_curr, lam_prev, lam_work;
+  Field truth0 = {NULL, NULL, NULL};
+  Field background0 = {NULL, NULL, NULL};
+  Field analysis0 = {NULL, NULL, NULL};
+  Field trial0 = {NULL, NULL, NULL};
+  Field grad = {NULL, NULL, NULL};
+  Field trial_grad = {NULL, NULL, NULL};
+  Field direction = {NULL, NULL, NULL};
+  Field truth_tmp = {NULL, NULL, NULL};
+  Field lam_curr = {NULL, NULL, NULL};
+  Field lam_prev = {NULL, NULL, NULL};
+  Field lam_work = {NULL, NULL, NULL};
   Field *truth_traj = NULL;
   Field *bg_traj = NULL;
   Field *an_traj = NULL;
   Field *stage = NULL;
-  Field qtmp;
+  Field qtmp = {NULL, NULL, NULL};
   FILE *hist = NULL;
   FILE *misfit_hist = NULL;
   double cycle_obs_cost[NCYCLES];
   double cycle_obs_rms[NCYCLES];
   double alpha_prev = VAR_ALPHA_INIT;
+  int status = 1;
 
   rng_seed(&rng_init, 2026050901ULL);
   rng_seed(&rng_obs, 2026050902ULL);
@@ -952,22 +961,17 @@ int main(void)
 
   if (!make_output_dir()) {
     fprintf(stderr, "cannot create output directory %s\n", OUT_DIR);
-    return 1;
+    goto cleanup;
   }
 
   obs = (double *)malloc((size_t)NCYCLES * NOBS * sizeof(double));
-  truth_traj = (Field *)malloc((size_t)(nsteps_total + 1) * sizeof(Field));
-  bg_traj = (Field *)malloc((size_t)(nsteps_total + 1) * sizeof(Field));
-  an_traj = (Field *)malloc((size_t)(nsteps_total + 1) * sizeof(Field));
-  stage = (Field *)malloc((size_t)nsteps_total * sizeof(Field));
+  truth_traj = (Field *)calloc((size_t)(nsteps_total + 1), sizeof(Field));
+  bg_traj = (Field *)calloc((size_t)(nsteps_total + 1), sizeof(Field));
+  an_traj = (Field *)calloc((size_t)(nsteps_total + 1), sizeof(Field));
+  stage = (Field *)calloc((size_t)nsteps_total, sizeof(Field));
   if (!obs || !truth_traj || !bg_traj || !an_traj || !stage) {
     fprintf(stderr, "top-level allocation failed\n");
-    free(obs);
-    free(truth_traj);
-    free(bg_traj);
-    free(an_traj);
-    free(stage);
-    return 1;
+    goto cleanup;
   }
 
   if (!allocate_field(&truth0, ncell) ||
@@ -987,11 +991,11 @@ int main(void)
       !allocate_field_array(an_traj, nsteps_total + 1, ncell) ||
       !allocate_field_array(stage, nsteps_total, ncell)) {
     fprintf(stderr, "field allocation failed\n");
-    return 1;
+    goto cleanup;
   }
 
   build_observation_network(&grid, obs_idx, NOBS);
-  write_obs_config(obs_idx, NOBS);
+  write_obs_config(obs_idx, NOBS, &grid);
 
   initialize_gaussian_bump(&truth0, &grid);
   copy_field(&background0, &truth0, ncell);
@@ -1011,12 +1015,12 @@ int main(void)
   hist = fopen(OUT_DIR "/cost_history.csv", "w");
   if (!hist) {
     fprintf(stderr, "cannot open cost history\n");
-    return 1;
+    goto cleanup;
   }
   misfit_hist = fopen(OUT_DIR "/iter_cycle_misfit.csv", "w");
   if (!misfit_hist) {
     fprintf(stderr, "cannot open iteration-cycle misfit history\n");
-    return 1;
+    goto cleanup;
   }
   fprintf(hist, "iter,cost,grad_norm,step_length\n");
   fprintf(misfit_hist, "iter,cycle,time,obs_cost,obs_rms\n");
@@ -1025,6 +1029,81 @@ int main(void)
   printf("grid=%dx%d obs=%d cycles=%d fixed_dt=%.6f steps=%d\n",
 	 NX, NY, NOBS, NCYCLES, dt, nsteps_total);
   printf("output directory: %s\n\n", OUT_DIR);
+
+  /* ── Gradient verification (Taylor test) ── */
+  {
+    Rng rng_t;
+    FILE *taylor_fp = NULL;
+    rng_seed(&rng_t, 42);
+    int ns = 3 * ncell;
+    double *dir = malloc((size_t)ns * sizeof(double));
+    double dnrm = 0.0;
+    if (!dir) {
+      fprintf(stderr, "Taylor-test direction allocation failed\n");
+      goto cleanup;
+    }
+    for (int k = 0; k < ns; ++k) { dir[k] = rng_normal(&rng_t); dnrm += dir[k]*dir[k]; }
+    dnrm = sqrt(dnrm);
+    for (int k = 0; k < ns; ++k) dir[k] /= dnrm;
+
+    double J0 = evaluate_cost_gradient(&analysis0, &background0, &grid, obs_idx, obs,
+                                        an_traj, stage, &qtmp, &lam_curr, &lam_prev,
+                                        &lam_work, &grad, NULL, NULL,
+                                        nsteps_total, dt, SIGMA_H0, SIGMA_M0, OBS_STD);
+    double dJ = 0.0;
+    for (int k = 0; k < ncell; ++k) {
+      dJ += grad.h[k] * dir[k] + grad.hu[k] * dir[ncell+k] + grad.hv[k] * dir[2*ncell+k];
+    }
+    printf("── Taylor test ──\n  J₀=%.6e  |∇J|=%.6e  ∇J·d=%.6e\n",
+           J0, field_norm(&grad, ncell), dJ);
+    printf("  ε          |J(x+εd)−J(x)−ε∇J·d|   ratio\n");
+    taylor_fp = fopen(OUT_DIR "/fd_adjoint_check.csv", "w");
+    if (!taylor_fp) {
+      fprintf(stderr, "warning: cannot open FD/adjoint check output\n");
+    } else {
+      fprintf(taylor_fp,
+              "epsilon,cost,fd_directional,adjoint_directional,phi,one_minus_abs_phi,taylor_residual\n");
+    }
+    double prev = 0.0;
+    for (int e = 0; e < 5; ++e) {
+      double eps = pow(10.0, -(e+1));
+      Field xp = {NULL, NULL, NULL};
+      if (!allocate_field(&xp, ncell)) {
+        fprintf(stderr, "Taylor-test perturbation allocation failed\n");
+        if (taylor_fp) fclose(taylor_fp);
+        free(dir);
+        goto cleanup;
+      }
+      for (int k = 0; k < ncell; ++k) {
+        xp.h[k] = analysis0.h[k] + eps*dir[k];
+        xp.hu[k] = analysis0.hu[k] + eps*dir[ncell+k];
+        xp.hv[k] = analysis0.hv[k] + eps*dir[2*ncell+k];
+      }
+      double Jp = evaluate_cost_gradient(&xp, &background0, &grid, obs_idx, obs,
+                                          an_traj, stage, &qtmp, &lam_curr, &lam_prev,
+                                          &lam_work, &grad, NULL, NULL,
+                                          nsteps_total, dt, SIGMA_H0, SIGMA_M0, OBS_STD);
+      double err = fabs(Jp - J0 - eps * dJ);
+      double fd_dir = (Jp - J0) / eps;
+      double phi = isfinite(fd_dir) && dJ != 0.0
+        ? fd_dir / dJ
+        : NAN;
+      double one_minus_abs_phi = isfinite(phi)
+        ? 1.0 - fabs(phi)
+        : NAN;
+      printf("  %.0e      %.4e      %s\n", eps, err,
+             (e > 0) ? ((prev/err > 50) ? "O(ε²)" : (prev/err > 5) ? "O(ε)" : "?") : "");
+      if (taylor_fp) {
+        fprintf(taylor_fp, "%.12e,%.12e,%.12e,%.12e,%.12e,%.12e,%.12e\n",
+                eps, Jp, fd_dir, dJ, phi, one_minus_abs_phi, err);
+      }
+      prev = err;
+      free_field(&xp);
+    }
+    if (taylor_fp) fclose(taylor_fp);
+    free(dir);
+  }
+
   printf("iter cost             grad_norm        step\n");
 
   for (int iter = 0; iter < VAR_MAX_ITER; ++iter) {
@@ -1040,8 +1119,7 @@ int main(void)
 
     if (!isfinite(J) || !isfinite(grad_norm)) {
       fprintf(stderr, "non-finite cost or gradient\n");
-      fclose(hist);
-      return 1;
+      goto cleanup;
     }
 
     if (grad_norm < 1.0e-6) {
@@ -1092,7 +1170,9 @@ int main(void)
   }
 
   fclose(hist);
+  hist = NULL;
   fclose(misfit_hist);
+  misfit_hist = NULL;
 
   evaluate_cost_gradient(&background0, &background0, &grid, obs_idx, obs,
 			 bg_traj, stage, &qtmp, &lam_curr, &lam_prev, &lam_work,
@@ -1105,7 +1185,7 @@ int main(void)
     FILE *metrics = fopen(OUT_DIR "/trajectory_metrics.csv", "w");
     if (!metrics) {
       fprintf(stderr, "cannot open trajectory metrics\n");
-      return 1;
+      goto cleanup;
     }
 
     fprintf(metrics, "cycle,time,background_rmse_h,analysis_rmse_h\n");
@@ -1132,11 +1212,17 @@ int main(void)
   write_field_csv(OUT_DIR "/analysis_initial.csv", &analysis0, &grid, 0.0);
   write_field_csv(OUT_DIR "/truth_initial.csv", &truth0, &grid, 0.0);
 
+  status = 0;
+
+cleanup:
+  if (hist) fclose(hist);
+  if (misfit_hist) fclose(misfit_hist);
+
   free(obs);
-  free_field_array(truth_traj, nsteps_total + 1);
-  free_field_array(bg_traj, nsteps_total + 1);
-  free_field_array(an_traj, nsteps_total + 1);
-  free_field_array(stage, nsteps_total);
+  if (truth_traj) free_field_array(truth_traj, nsteps_total + 1);
+  if (bg_traj) free_field_array(bg_traj, nsteps_total + 1);
+  if (an_traj) free_field_array(an_traj, nsteps_total + 1);
+  if (stage) free_field_array(stage, nsteps_total);
   free(truth_traj);
   free(bg_traj);
   free(an_traj);
@@ -1155,6 +1241,8 @@ int main(void)
   free_field(&lam_work);
   free_field(&qtmp);
 
-  printf("\nDone. Outputs written to %s\n", OUT_DIR);
-  return 0;
+  if (status == 0) {
+    printf("\nDone. Outputs written to %s\n", OUT_DIR);
+  }
+  return status;
 }
