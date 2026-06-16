@@ -50,6 +50,7 @@
 #define VAR_ALPHA_MAX     1.0
 #define VAR_ALPHA_SHRINK  0.5
 #define VAR_ALPHA_GROW    2.0
+#define LBFGS_MEMORY      5
 
 #define FD_COMPONENT_SAMPLES 24
 #define FD_COMPONENT_EPS     1.0e-6
@@ -723,6 +724,64 @@ static void field_copy_scaled_precond(Field *dst, const Field *grad,
   }
 }
 
+static void field_subtract(Field *dst, const Field *A, const Field *B, int ncell)
+{
+  for (int k = 0; k < ncell; ++k) {
+    dst->h[k] = A->h[k] - B->h[k];
+    dst->hu[k] = A->hu[k] - B->hu[k];
+    dst->hv[k] = A->hv[k] - B->hv[k];
+  }
+}
+
+static void field_copy_negative(Field *dst, const Field *src, int ncell)
+{
+  for (int k = 0; k < ncell; ++k) {
+    dst->h[k] = -src->h[k];
+    dst->hu[k] = -src->hu[k];
+    dst->hv[k] = -src->hv[k];
+  }
+}
+
+static void lbfgs_direction(Field *direction, const Field *grad,
+                            const Field *s_hist, const Field *y_hist,
+                            const double *rho_hist, int hist_count,
+                            int hist_head, double var_h, double var_m,
+                            double *alpha_work, Field *work, int ncell)
+{
+  double gamma = 1.0;
+
+  copy_field(work, grad, ncell);
+
+  for (int t = hist_count - 1; t >= 0; --t) {
+    int idx = (hist_head - 1 - t + LBFGS_MEMORY) % LBFGS_MEMORY;
+    alpha_work[idx] = rho_hist[idx] * field_dot(&s_hist[idx], work, ncell);
+    field_axpy(work, -alpha_work[idx], &y_hist[idx], ncell);
+  }
+
+  if (hist_count > 0) {
+    int last = (hist_head - 1 + LBFGS_MEMORY) % LBFGS_MEMORY;
+    double sy = field_dot(&s_hist[last], &y_hist[last], ncell);
+    double yy = field_dot(&y_hist[last], &y_hist[last], ncell);
+    if (sy > 0.0 && yy > 0.0 && isfinite(sy) && isfinite(yy)) {
+      gamma = sy / yy;
+    }
+  }
+
+  for (int k = 0; k < ncell; ++k) {
+    work->h[k] *= gamma * var_h;
+    work->hu[k] *= gamma * var_m;
+    work->hv[k] *= gamma * var_m;
+  }
+
+  for (int t = 0; t < hist_count; ++t) {
+    int idx = (hist_head - hist_count + t + LBFGS_MEMORY) % LBFGS_MEMORY;
+    double beta = rho_hist[idx] * field_dot(&y_hist[idx], work, ncell);
+    field_axpy(work, alpha_work[idx] - beta, &s_hist[idx], ncell);
+  }
+
+  field_copy_negative(direction, work, ncell);
+}
+
 static void obs_gradient_add(Field *lambda, const Field *state,
                              const int *obs_idx, const double *y,
                              int m, double obs_var)
@@ -935,11 +994,14 @@ static double evaluate_cost_gradient(
    * times and propagates them back to t=0 with the discrete adjoint. The final
    * gradient is the background term plus the adjoint arriving at t=0.
    */
-  const double var_h = sigma_h * sigma_h;
-  const double var_m = sigma_m * sigma_m;
-  const double obs_var = obs_std * obs_std;
+  const double background_var_h = sigma_h * sigma_h;
+  const double background_var_m = sigma_m * sigma_m;
+  const double obs_var_h = obs_std * obs_std;
+  const double inv_background_var_h = 1.0 / background_var_h;
+  const double inv_background_var_m = 1.0 / background_var_m;
+  const double inv_obs_var_h = 1.0 / obs_var_h;
   const int ncell = grid->nx * grid->ny;
-  double J = 0.0;
+  double total_cost = 0.0;
 
   if (cycle_obs_cost) {
     for (int cycle = 0; cycle < NCYCLES; ++cycle) cycle_obs_cost[cycle] = 0.0;
@@ -948,53 +1010,64 @@ static double evaluate_cost_gradient(
     for (int cycle = 0; cycle < NCYCLES; ++cycle) cycle_obs_rms[cycle] = 0.0;
   }
 
+  /* Forward trajectory and RK stage storage. */
   copy_field(&traj[0], x0, ncell);
   for (int n = 0; n < nsteps_total; ++n) {
     /* Full trajectory storage is required because this is a discrete adjoint. */
     step_rk2_store(&traj[n], &stage1[n], qtmp, &traj[n + 1], grid, dt);
   }
 
+  /* Background term: 0.5 * (x0 - xb)^T B^{-1} (x0 - xb). */
   zero_field(grad, ncell);
   for (int k = 0; k < ncell; ++k) {
-    /* Background term and its gradient: B is diagonal by variable. */
-    double dh = x0->h[k] - xb->h[k];
-    double dhu = x0->hu[k] - xb->hu[k];
-    double dhv = x0->hv[k] - xb->hv[k];
+    double h_departure = x0->h[k] - xb->h[k];
+    double hu_departure = x0->hu[k] - xb->hu[k];
+    double hv_departure = x0->hv[k] - xb->hv[k];
+    double weighted_h_departure = h_departure * inv_background_var_h;
+    double weighted_hu_departure = hu_departure * inv_background_var_m;
+    double weighted_hv_departure = hv_departure * inv_background_var_m;
 
-    J += 0.5 * dh * dh / var_h;
-    J += 0.5 * dhu * dhu / var_m;
-    J += 0.5 * dhv * dhv / var_m;
+    total_cost += 0.5 * h_departure * weighted_h_departure;
+    total_cost += 0.5 * hu_departure * weighted_hu_departure;
+    total_cost += 0.5 * hv_departure * weighted_hv_departure;
 
-    grad->h[k] = dh / var_h;
-    grad->hu[k] = dhu / var_m;
-    grad->hv[k] = dhv / var_m;
+    grad->h[k] = weighted_h_departure;
+    grad->hu[k] = weighted_hu_departure;
+    grad->hv[k] = weighted_hv_departure;
   }
 
+  /* Observation term at each window endpoint. */
   for (int cycle = 1; cycle <= NCYCLES; ++cycle) {
-    /* Add observation misfit at each assimilation-window endpoint. */
-    int step = cycle * VAR_STEPS_WINDOW;
-    const double *y = obs + (size_t)(cycle - 1) * NOBS;
-    const Field *U = &traj[step];
-    double jobs = 0.0;
-    double srms = 0.0;
+    int obs_step = cycle * VAR_STEPS_WINDOW;
+    const double *obs_at_cycle = obs + (size_t)(cycle - 1) * NOBS;
+    const Field *state_at_obs = &traj[obs_step];
+    double cycle_cost = 0.0;
+    double cycle_sse = 0.0;
 
     for (int p = 0; p < NOBS; ++p) {
-      double d = U->h[obs_idx[p]] - y[p];
-      J += 0.5 * d * d / obs_var;
-      jobs += 0.5 * d * d / obs_var;
-      srms += d * d;
+      int cell = obs_idx[p];
+      double innovation = state_at_obs->h[cell] - obs_at_cycle[p];
+      double weighted_innovation = innovation * inv_obs_var_h;
+
+      cycle_cost += 0.5 * innovation * weighted_innovation;
+      cycle_sse += innovation * innovation;
     }
-    if (cycle_obs_cost) cycle_obs_cost[cycle - 1] = jobs;
-    if (cycle_obs_rms) cycle_obs_rms[cycle - 1] = sqrt(srms / NOBS);
+
+    total_cost += cycle_cost;
+    if (cycle_obs_cost) cycle_obs_cost[cycle - 1] = cycle_cost;
+    if (cycle_obs_rms) cycle_obs_rms[cycle - 1] = sqrt(cycle_sse / NOBS);
   }
 
+  /* Reverse pass: inject observation gradients and propagate to t=0. */
   zero_field(lam_curr, ncell);
   for (int n = nsteps_total; n >= 1; --n) {
     if (n % VAR_STEPS_WINDOW == 0) {
       /* Observation gradient is injected before stepping backward past t_n. */
       int cycle = n / VAR_STEPS_WINDOW;
-      const double *y = obs + (size_t)(cycle - 1) * NOBS;
-      obs_gradient_add(lam_curr, &traj[n], obs_idx, y, NOBS, obs_var);
+      const double *obs_at_cycle = obs + (size_t)(cycle - 1) * NOBS;
+
+      obs_gradient_add(lam_curr, &traj[n], obs_idx,
+		       obs_at_cycle, NOBS, obs_var_h);
     }
 
     rk2_adjoint_step(&traj[n - 1], &stage1[n - 1],
@@ -1004,7 +1077,7 @@ static double evaluate_cost_gradient(
   }
 
   field_axpy(grad, 1.0, lam_curr, ncell);
-  return J;
+  return total_cost;
 }
 
 static int line_search_two_way(
@@ -1111,6 +1184,9 @@ int main(void)
   Field grad = {NULL, NULL, NULL};
   Field trial_grad = {NULL, NULL, NULL};
   Field direction = {NULL, NULL, NULL};
+  Field grad_old = {NULL, NULL, NULL};
+  Field x_old = {NULL, NULL, NULL};
+  Field lbfgs_work = {NULL, NULL, NULL};
   Field truth_tmp = {NULL, NULL, NULL};
   Field lam_curr = {NULL, NULL, NULL};
   Field lam_prev = {NULL, NULL, NULL};
@@ -1119,12 +1195,18 @@ int main(void)
   Field *bg_traj = NULL;
   Field *an_traj = NULL;
   Field *stage = NULL;
+  Field *s_hist = NULL;
+  Field *y_hist = NULL;
   Field qtmp = {NULL, NULL, NULL};
   FILE *hist = NULL;
   FILE *misfit_hist = NULL;
   double cycle_obs_cost[NCYCLES];
   double cycle_obs_rms[NCYCLES];
+  double rho_hist[LBFGS_MEMORY] = {0.0};
+  double alpha_work[LBFGS_MEMORY] = {0.0};
   double alpha_prev = VAR_ALPHA_INIT;
+  int lbfgs_count = 0;
+  int lbfgs_head = 0;
   int status = 1;
 
   rng_seed(&rng_init, 2026050901ULL);
@@ -1147,7 +1229,10 @@ int main(void)
   bg_traj = (Field *)calloc((size_t)(nsteps_total + 1), sizeof(Field));
   an_traj = (Field *)calloc((size_t)(nsteps_total + 1), sizeof(Field));
   stage = (Field *)calloc((size_t)nsteps_total, sizeof(Field));
-  if (!obs || !truth_traj || !bg_traj || !an_traj || !stage) {
+  s_hist = (Field *)calloc((size_t)LBFGS_MEMORY, sizeof(Field));
+  y_hist = (Field *)calloc((size_t)LBFGS_MEMORY, sizeof(Field));
+  if (!obs || !truth_traj || !bg_traj || !an_traj || !stage ||
+      !s_hist || !y_hist) {
     fprintf(stderr, "top-level allocation failed\n");
     goto cleanup;
   }
@@ -1159,6 +1244,9 @@ int main(void)
       !allocate_field(&grad, ncell) ||
       !allocate_field(&trial_grad, ncell) ||
       !allocate_field(&direction, ncell) ||
+      !allocate_field(&grad_old, ncell) ||
+      !allocate_field(&x_old, ncell) ||
+      !allocate_field(&lbfgs_work, ncell) ||
       !allocate_field(&truth_tmp, ncell) ||
       !allocate_field(&lam_curr, ncell) ||
       !allocate_field(&lam_prev, ncell) ||
@@ -1167,7 +1255,9 @@ int main(void)
       !allocate_field_array(truth_traj, nsteps_total + 1, ncell) ||
       !allocate_field_array(bg_traj, nsteps_total + 1, ncell) ||
       !allocate_field_array(an_traj, nsteps_total + 1, ncell) ||
-      !allocate_field_array(stage, nsteps_total, ncell)) {
+      !allocate_field_array(stage, nsteps_total, ncell) ||
+      !allocate_field_array(s_hist, LBFGS_MEMORY, ncell) ||
+      !allocate_field_array(y_hist, LBFGS_MEMORY, ncell)) {
     fprintf(stderr, "field allocation failed\n");
     goto cleanup;
   }
@@ -1351,8 +1441,8 @@ int main(void)
 
   /*
    * Optimize only the initial state. Each iteration reevaluates the full
-   * nonlinear trajectory and its discrete-adjoint gradient, then performs a
-   * preconditioned descent step accepted by the line search.
+   * nonlinear trajectory and its discrete-adjoint gradient, then uses L-BFGS
+   * curvature pairs to build a quasi-Newton search direction.
    */
   for (int iter = 0; iter < VAR_MAX_ITER; ++iter) {
     double J = evaluate_cost_gradient(&analysis0, &background0, &grid, obs_idx, obs,
@@ -1387,7 +1477,21 @@ int main(void)
 	      cycle_obs_cost[cycle - 1], cycle_obs_rms[cycle - 1]);
     }
 
-    field_copy_scaled_precond(&direction, &grad, var_h, var_m, ncell);
+    copy_field(&x_old, &analysis0, ncell);
+    copy_field(&grad_old, &grad, ncell);
+
+    if (lbfgs_count > 0) {
+      lbfgs_direction(&direction, &grad, s_hist, y_hist, rho_hist,
+		      lbfgs_count, lbfgs_head, var_h, var_m,
+		      alpha_work, &lbfgs_work, ncell);
+      if (!(field_dot(&grad, &direction, ncell) < 0.0)) {
+	lbfgs_count = 0;
+	lbfgs_head = 0;
+	field_copy_scaled_precond(&direction, &grad, var_h, var_m, ncell);
+      }
+    } else {
+      field_copy_scaled_precond(&direction, &grad, var_h, var_m, ncell);
+    }
 
     {
       double gtp = field_dot(&grad, &direction, ncell);
@@ -1403,13 +1507,44 @@ int main(void)
 				     ncell, &alpha);
 
       if (!accepted) {
-	fprintf(hist, "%d,%.12e,%.12e,0\n", iter, J, grad_norm);
-	printf("failed\n");
-	fprintf(stderr, "line search failed at iteration %d\n", iter);
-	break;
+	lbfgs_count = 0;
+	lbfgs_head = 0;
+	field_copy_scaled_precond(&direction, &grad, var_h, var_m, ncell);
+	gtp = field_dot(&grad, &direction, ncell);
+	accepted = line_search_two_way(&analysis0, &background0, &direction,
+				       J, gtp, VAR_ALPHA_INIT,
+				       &grid, obs_idx, obs,
+				       &trial0, bg_traj, stage, &qtmp,
+				       &lam_curr, &lam_prev, &lam_work, &trial_grad,
+				       nsteps_total, dt,
+				       SIGMA_H0, SIGMA_M0, OBS_STD,
+				       ncell, &alpha);
+
+	if (!accepted) {
+	  fprintf(hist, "%d,%.12e,%.12e,0\n", iter, J, grad_norm);
+	  printf("failed\n");
+	  fprintf(stderr, "line search failed at iteration %d\n", iter);
+	  break;
+	}
       }
 
       copy_field(&analysis0, &trial0, ncell);
+      {
+	int idx = lbfgs_head;
+	double sy;
+
+	field_subtract(&s_hist[idx], &analysis0, &x_old, ncell);
+	field_subtract(&y_hist[idx], &trial_grad, &grad_old, ncell);
+	sy = field_dot(&s_hist[idx], &y_hist[idx], ncell);
+	if (sy > 1.0e-14 && isfinite(sy)) {
+	  rho_hist[idx] = 1.0 / sy;
+	  lbfgs_head = (lbfgs_head + 1) % LBFGS_MEMORY;
+	  if (lbfgs_count < LBFGS_MEMORY) lbfgs_count++;
+	} else {
+	  lbfgs_count = 0;
+	  lbfgs_head = 0;
+	}
+      }
       alpha_prev = alpha;
     }
 
@@ -1472,10 +1607,14 @@ cleanup:
   if (bg_traj) free_field_array(bg_traj, nsteps_total + 1);
   if (an_traj) free_field_array(an_traj, nsteps_total + 1);
   if (stage) free_field_array(stage, nsteps_total);
+  if (s_hist) free_field_array(s_hist, LBFGS_MEMORY);
+  if (y_hist) free_field_array(y_hist, LBFGS_MEMORY);
   free(truth_traj);
   free(bg_traj);
   free(an_traj);
   free(stage);
+  free(s_hist);
+  free(y_hist);
 
   free_field(&truth0);
   free_field(&background0);
@@ -1484,6 +1623,9 @@ cleanup:
   free_field(&grad);
   free_field(&trial_grad);
   free_field(&direction);
+  free_field(&grad_old);
+  free_field(&x_old);
+  free_field(&lbfgs_work);
   free_field(&truth_tmp);
   free_field(&lam_curr);
   free_field(&lam_prev);
