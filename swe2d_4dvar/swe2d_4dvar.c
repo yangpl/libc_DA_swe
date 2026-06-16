@@ -10,6 +10,21 @@
 #include <sys/stat.h>
 #endif
 
+/*
+ * Standalone 2-D shallow-water strong-constraint 4D-Var example.
+ *
+ * The model state is stored as three cell-centered arrays:
+ *
+ *   h  : water depth
+ *   hu : x momentum
+ *   hv : y momentum
+ *
+ * A truth trajectory is generated from a Gaussian height perturbation,
+ * noisy height-only observations are sampled every assimilation window,
+ * and the initial condition is optimized with a discrete adjoint of the
+ * exact time-stepping code used by the nonlinear model.
+ */
+
 #define G         9.81
 #define HMIN      1.0e-6
 #define PI        3.14159265358979323846
@@ -236,6 +251,7 @@ static State get_state_bc(const Field *U, int i, int j, int nx, int ny)
 {
   State q;
 
+  /* Clamp ghost-cell requests to the nearest interior cell. */
   if (i < 0) i = 0;
   if (i >= nx) i = nx - 1;
   if (j < 0) j = 0;
@@ -252,6 +268,17 @@ static State get_state_bc(const Field *U, int i, int j, int nx, int ny)
 
 static void flux_jacobian_x(State q, double J[9])
 {
+  /*
+   * Jacobian of the physical x-flux
+   *
+   *   F(q) = [ hu,
+   *            hu^2 / h + 0.5 g h^2,
+   *            hu hv / h ].
+   *
+   * Entries are row-major: J[3*r+c] = dF_r/dq_c for q=(h,hu,hv).
+   * The dhs factor freezes the h derivative when h is below the dry floor,
+   * matching the safe_h() branch used by the nonlinear flux.
+   */
   double hraw = q.h;
   double h = safe_h(hraw);
   double dhs = (hraw > HMIN) ? 1.0 : 0.0;
@@ -273,6 +300,13 @@ static void flux_jacobian_x(State q, double J[9])
 
 static void flux_jacobian_y(State q, double J[9])
 {
+  /*
+   * Jacobian of the physical y-flux
+   *
+   *   G(q) = [ hv,
+   *            hu hv / h,
+   *            hv^2 / h + 0.5 g h^2 ].
+   */
   double hraw = q.h;
   double h = safe_h(hraw);
   double dhs = (hraw > HMIN) ? 1.0 : 0.0;
@@ -320,6 +354,11 @@ static State flux_y(State q)
 
 static void wavespeed_grad_x(State q, double grad[3], double *speed)
 {
+  /*
+   * Local Rusanov signal speed in x: |u| + sqrt(g h), plus its derivative.
+   * signum() gives a piecewise derivative of |u|; at u=0 the chosen
+   * subgradient is zero, which is adequate for the discrete adjoint check.
+   */
   double hraw = q.h;
   double h = safe_h(hraw);
   double dhs = (hraw > HMIN) ? 1.0 : 0.0;
@@ -335,6 +374,10 @@ static void wavespeed_grad_x(State q, double grad[3], double *speed)
 
 static void wavespeed_grad_y(State q, double grad[3], double *speed)
 {
+  /*
+   * y-direction counterpart of wavespeed_grad_x(): speed is
+   * |v| + sqrt(g h), and grad is d(speed)/d(h,hu,hv).
+   */
   double hraw = q.h;
   double h = safe_h(hraw);
   double dhs = (hraw > HMIN) ? 1.0 : 0.0;
@@ -350,6 +393,13 @@ static void wavespeed_grad_y(State q, double grad[3], double *speed)
 
 static void rusanov_x(State qL, State qR, State *fout)
 {
+  /*
+   * Local Lax-Friedrichs/Rusanov interface flux:
+   *
+   *   Fhat = 0.5(F_L + F_R) - 0.5 s (q_R - q_L),
+   *
+   * where s is the larger one-sided gravity-wave speed.
+   */
   State fL = flux_x(qL);
   State fR = flux_x(qR);
   double gradL[3], gradR[3];
@@ -366,6 +416,7 @@ static void rusanov_x(State qL, State qR, State *fout)
 
 static void rusanov_y(State qB, State qT, State *gout)
 {
+  /* Same Rusanov flux as rusanov_x(), applied to a bottom/top y-face. */
   State gB = flux_y(qB);
   State gT = flux_y(qT);
   double gradB[3], gradT[3];
@@ -382,6 +433,11 @@ static void rusanov_y(State qB, State qT, State *gout)
 
 static void rusanov_x_jacobians(State qL, State qR, double JL[9], double JR[9])
 {
+  /*
+   * Derivatives of the numerical x-flux with respect to the left and right
+   * interface states. The derivative of max(aL,aR) is assigned to whichever
+   * side wins the comparison, consistent with the nonlinear branch.
+   */
   double A_L[9], A_R[9];
   double gradL[3] = {0}, gradR[3] = {0};
   double aL, aR, s;
@@ -410,6 +466,10 @@ static void rusanov_x_jacobians(State qL, State qR, double JL[9], double JR[9])
 
   for (int r = 0; r < 3; ++r) {
     for (int c = 0; c < 3; ++c) {
+      /*
+       * Differentiate 0.5(F_L+F_R)-0.5*s*dq. The +/- identity terms come
+       * from d(dq)/dqL=-I and d(dq)/dqR=I; the gs terms come from ds/dq.
+       */
       double left = 0.5 * A_L[3 * r + c] + 0.5 * s * (r == c ? 1.0 : 0.0);
       double right = 0.5 * A_R[3 * r + c] - 0.5 * s * (r == c ? 1.0 : 0.0);
       if (gsL) left -= 0.5 * dq[r] * gsL[c];
@@ -422,6 +482,10 @@ static void rusanov_x_jacobians(State qL, State qR, double JL[9], double JR[9])
 
 static void rusanov_y_jacobians(State qB, State qT, double JB[9], double JT[9])
 {
+  /*
+   * y-face version of rusanov_x_jacobians(). The bottom/top naming follows
+   * the finite-volume stencil in euler_update() and euler_adjoint().
+   */
   double A_B[9], A_T[9];
   double gradB[3] = {0}, gradT[3] = {0};
   double aB, aT, s;
@@ -462,6 +526,15 @@ static void rusanov_y_jacobians(State qB, State qT, double JB[9], double JT[9])
 
 static void euler_update(const Field *Uin, Field *Uout, const Grid *grid, double dt)
 {
+  /*
+   * One first-order finite-volume update:
+   *
+   *   U^{n+1}_{i,j} = U^n_{i,j}
+   *     - dt/dx (F_{i+1/2,j} - F_{i-1/2,j})
+   *     - dt/dy (G_{i,j+1/2} - G_{i,j-1/2}).
+   *
+   * Boundary fluxes use clamped ghost states from get_state_bc().
+   */
   for (int j = 0; j < grid->ny; ++j) {
     for (int i = 0; i < grid->nx; ++i) {
       int k = idx2(i, j, grid->nx);
@@ -493,6 +566,16 @@ static void euler_update(const Field *Uin, Field *Uout, const Grid *grid, double
 static void step_rk2_store(const Field *Uin, Field *Ustage1, Field *Utmp2,
                            Field *Uout, const Grid *grid, double dt)
 {
+  /*
+   * Explicit trapezoid / Heun RK2 written as:
+   *
+   *   Q1   = E(Qn)
+   *   Qtmp = E(Q1)
+   *   Qn+1 = 0.5 Qn + 0.5 Qtmp
+   *
+   * The intermediate Q1 is stored because the exact discrete adjoint of this
+   * step needs the same linearization point for the second Euler operator.
+   */
   int ncell = grid->nx * grid->ny;
 
   euler_update(Uin, Ustage1, grid, dt);
@@ -508,6 +591,10 @@ static void step_rk2_store(const Field *Uin, Field *Ustage1, Field *Utmp2,
 
 static void build_observation_network(const Grid *grid, int *obs_idx, int m)
 {
+  /*
+   * Place height observations on a roughly square lattice over the central
+   * portion of the domain, avoiding boundaries where clamped states dominate.
+   */
   int p = 0;
   int ix_start = grid->nx / 6;
   int ix_end = 5 * grid->nx / 6;
@@ -625,6 +712,10 @@ static void field_combine(Field *Y, const Field *A, double alpha,
 static void field_copy_scaled_precond(Field *dst, const Field *grad,
                                       double var_h, double var_m, int ncell)
 {
+  /*
+   * Diagonal background-error preconditioning for the descent direction:
+   * p = -B grad, with B = diag(var_h, var_m, var_m) per cell.
+   */
   for (int k = 0; k < ncell; ++k) {
     dst->h[k] = -var_h * grad->h[k];
     dst->hu[k] = -var_m * grad->hu[k];
@@ -636,6 +727,10 @@ static void obs_gradient_add(Field *lambda, const Field *state,
                              const int *obs_idx, const double *y,
                              int m, double obs_var)
 {
+  /*
+   * Add H^T R^{-1}(H x - y) to the adjoint at an observation time. Since H
+   * extracts only h at selected cells, only lambda->h receives increments.
+   */
   for (int p = 0; p < m; ++p) {
     int k = obs_idx[p];
     lambda->h[k] += (state->h[k] - y[p]) / obs_var;
@@ -645,6 +740,10 @@ static void obs_gradient_add(Field *lambda, const Field *state,
 static void add_matT_vec_to_cell(Field *lam, int cell, const double J[9],
                                  const double v[3], double coeff)
 {
+  /*
+   * Accumulate coeff * J^T v into one cell of an adjoint field. This is the
+   * basic reverse-mode operation used for each numerical-flux dependency.
+   */
   lam->h[cell]  += coeff * (J[0] * v[0] + J[3] * v[1] + J[6] * v[2]);
   lam->hu[cell] += coeff * (J[1] * v[0] + J[4] * v[1] + J[7] * v[2]);
   lam->hv[cell] += coeff * (J[2] * v[0] + J[5] * v[1] + J[8] * v[2]);
@@ -653,6 +752,15 @@ static void add_matT_vec_to_cell(Field *lam, int cell, const double J[9],
 static void euler_adjoint(const Field *Uin, const Field *lam_out,
                           Field *lam_in, const Grid *grid, double dt)
 {
+  /*
+   * Reverse-mode transpose of euler_update().
+   *
+   * For each output cell k, lam_out[k] contributes directly to Uin[k] through
+   * the identity term, and indirectly to the cells used by the four interface
+   * fluxes. The signs below mirror the finite-volume residual:
+   *
+   *   -dt/dx * FxR, +dt/dx * FxL, -dt/dy * FyT, +dt/dy * FyB.
+   */
   double JL[9], JR[9], JB[9], JT[9];
 
   zero_field(lam_in, grid->nx * grid->ny);
@@ -679,22 +787,27 @@ static void euler_adjoint(const Field *Uin, const Field *lam_out,
       v[1] = lam_out->hu[k];
       v[2] = lam_out->hv[k];
 
+      /* Identity part: Uout starts from Uin before flux divergences. */
       lam_in->h[k] += v[0];
       lam_in->hu[k] += v[1];
       lam_in->hv[k] += v[2];
 
+      /* Right x-face F(q_ij, q_i+1,j) enters this cell with -dt/dx. */
       rusanov_x_jacobians(qij, qip1j, JL, JR);
       add_matT_vec_to_cell(lam_in, k,  JL, v, -dt / grid->dx);
       add_matT_vec_to_cell(lam_in, kR, JR, v, -dt / grid->dx);
 
+      /* Left x-face F(q_i-1,j, q_ij) enters this cell with +dt/dx. */
       rusanov_x_jacobians(qim1j, qij, JL, JR);
       add_matT_vec_to_cell(lam_in, kL, JL, v,  dt / grid->dx);
       add_matT_vec_to_cell(lam_in, k,  JR, v,  dt / grid->dx);
 
+      /* Top y-face G(q_ij, q_i,j+1) enters this cell with -dt/dy. */
       rusanov_y_jacobians(qij, qijp1, JB, JT);
       add_matT_vec_to_cell(lam_in, k,  JB, v, -dt / grid->dy);
       add_matT_vec_to_cell(lam_in, kT, JT, v, -dt / grid->dy);
 
+      /* Bottom y-face G(q_i,j-1, q_ij) enters this cell with +dt/dy. */
       rusanov_y_jacobians(qijm1, qij, JB, JT);
       add_matT_vec_to_cell(lam_in, kB, JB, v,  dt / grid->dy);
       add_matT_vec_to_cell(lam_in, k,  JT, v,  dt / grid->dy);
@@ -707,6 +820,13 @@ static void rk2_adjoint_step(const Field *Qn, const Field *Q1,
                              Field *lam_stage2, Field *lam_stage1,
                              const Grid *grid, double dt)
 {
+  /*
+   * Reverse of the RK2 composition used in step_rk2_store().
+   *
+   * Q_{n+1} = 0.5 Q_n + 0.5 E(Q1), Q1 = E(Q_n).
+   * Therefore lam_np1 is split: half goes directly to Q_n, half goes through
+   * the second Euler update at Q1, then through the first Euler update at Qn.
+   */
   int ncell = grid->nx * grid->ny;
 
   for (int k = 0; k < ncell; ++k) {
@@ -804,6 +924,17 @@ static double evaluate_cost_gradient(
 				     double sigma_m,
 				     double obs_std)
 {
+  /*
+   * Evaluate the 4D-Var objective and its gradient with respect to x0:
+   *
+   *   J(x0) = 0.5 ||x0 - xb||_{B^{-1}}^2
+   *         + 0.5 sum_k ||H x(t_k; x0) - y_k||_{R^{-1}}^2.
+   *
+   * The forward pass stores the full nonlinear trajectory and RK2 stage
+   * states. The reverse pass injects observation residuals at observation
+   * times and propagates them back to t=0 with the discrete adjoint. The final
+   * gradient is the background term plus the adjoint arriving at t=0.
+   */
   const double var_h = sigma_h * sigma_h;
   const double var_m = sigma_m * sigma_m;
   const double obs_var = obs_std * obs_std;
@@ -819,11 +950,13 @@ static double evaluate_cost_gradient(
 
   copy_field(&traj[0], x0, ncell);
   for (int n = 0; n < nsteps_total; ++n) {
+    /* Full trajectory storage is required because this is a discrete adjoint. */
     step_rk2_store(&traj[n], &stage1[n], qtmp, &traj[n + 1], grid, dt);
   }
 
   zero_field(grad, ncell);
   for (int k = 0; k < ncell; ++k) {
+    /* Background term and its gradient: B is diagonal by variable. */
     double dh = x0->h[k] - xb->h[k];
     double dhu = x0->hu[k] - xb->hu[k];
     double dhv = x0->hv[k] - xb->hv[k];
@@ -838,6 +971,7 @@ static double evaluate_cost_gradient(
   }
 
   for (int cycle = 1; cycle <= NCYCLES; ++cycle) {
+    /* Add observation misfit at each assimilation-window endpoint. */
     int step = cycle * VAR_STEPS_WINDOW;
     const double *y = obs + (size_t)(cycle - 1) * NOBS;
     const Field *U = &traj[step];
@@ -857,6 +991,7 @@ static double evaluate_cost_gradient(
   zero_field(lam_curr, ncell);
   for (int n = nsteps_total; n >= 1; --n) {
     if (n % VAR_STEPS_WINDOW == 0) {
+      /* Observation gradient is injected before stepping backward past t_n. */
       int cycle = n / VAR_STEPS_WINDOW;
       const double *y = obs + (size_t)(cycle - 1) * NOBS;
       obs_gradient_add(lam_curr, &traj[n], obs_idx, y, NOBS, obs_var);
@@ -898,6 +1033,11 @@ static int line_search_two_way(
 			       int ncell,
 			       double *alpha_out)
 {
+  /*
+   * Strong-Wolfe-style line search along a descent direction. The previous
+   * accepted step is reused as a hint; the bracket either shrinks after
+   * Armijo failure or expands while the curvature condition is not met.
+   */
   double alpha = min2(max2(alpha_hint, VAR_ALPHA_MIN), VAR_ALPHA_MAX);
   double alpha_lo = 0.0;
   double alpha_hi = 0.0;
@@ -1035,6 +1175,11 @@ int main(void)
   build_observation_network(&grid, obs_idx, NOBS);
   write_obs_config(obs_idx, NOBS, &grid);
 
+  /*
+   * Create the twin experiment: truth starts from the smooth bump, background
+   * is a noisy perturbation of that initial condition, and observations are
+   * sampled from the evolved truth trajectory.
+   */
   initialize_gaussian_bump(&truth0, &grid);
   copy_field(&background0, &truth0, ncell);
   perturb_member(&background0, ncell, SIGMA_H0, SIGMA_M0, &rng_init);
@@ -1204,6 +1349,11 @@ int main(void)
 
   printf("iter cost             grad_norm        step\n");
 
+  /*
+   * Optimize only the initial state. Each iteration reevaluates the full
+   * nonlinear trajectory and its discrete-adjoint gradient, then performs a
+   * preconditioned descent step accepted by the line search.
+   */
   for (int iter = 0; iter < VAR_MAX_ITER; ++iter) {
     double J = evaluate_cost_gradient(&analysis0, &background0, &grid, obs_idx, obs,
 				      an_traj, stage, &qtmp, &lam_curr, &lam_prev,
@@ -1279,6 +1429,7 @@ int main(void)
 			 an_traj, stage, &qtmp, &lam_curr, &lam_prev, &lam_work,
 			 &grad, NULL, NULL, nsteps_total, dt, SIGMA_H0, SIGMA_M0, OBS_STD);
 
+  /* Rebuild background and analysis trajectories for output diagnostics. */
   {
     FILE *metrics = fopen(OUT_DIR "/trajectory_metrics.csv", "w");
     if (!metrics) {
