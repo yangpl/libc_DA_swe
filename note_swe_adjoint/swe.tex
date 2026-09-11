@@ -1,0 +1,679 @@
+\documentclass[12pt,a4paper,twoside]{article}
+\usepackage[fontset=ubuntu]{ctex}
+\usepackage[margin=1in]{geometry}
+\setlength{\headheight}{15pt}
+\usepackage{hyperref}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{natbib}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{algorithmicx}
+
+\hypersetup{colorlinks,linkcolor=blue,citecolor=blue}
+
+\usepackage{fancyhdr}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[LE,RO]{\thepage}
+\fancyhead[RE]{二维浅水方程的伴随}
+\fancyhead[LO]{二维浅水方程的伴随}
+\fancyhead[CE,CO]{杨鹏亮}
+
+\title{二维浅水方程的伴随}
+\author{杨鹏亮\thanks{Email: ypl.2100@gmail.com}}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本文简要整理二维浅水方程的显式离散、连续伴随推导、初值梯度公式，以及离散伴随的实现思路,重点是给出可直接用于 4D-Var 的核心公式。
+\end{abstract}
+
+\section{前向方程与显式离散}
+
+原方程写为
+\begin{align}
+    \frac{\partial u}{\partial t}
+    + u \frac{\partial u}{\partial x}
+    + v \frac{\partial u}{\partial y}
+    + g \frac{\partial z}{\partial x}
+    - f v + \gamma u &= 0, \\
+    \frac{\partial v}{\partial t}
+    + u \frac{\partial v}{\partial x}
+    + v \frac{\partial v}{\partial y}
+    + g \frac{\partial z}{\partial y}
+    + f u + \gamma v &= 0, \\
+    \frac{\partial z}{\partial t}
+    + \frac{\partial (H u)}{\partial x}
+    + \frac{\partial (H v)}{\partial y} &= 0, \\
+    H &= h + z. \nonumber
+\end{align}
+
+采用显式格式时，一步更新可写为
+\begin{align}
+u_{i,j}^{n+1} = &\, u_{i,j}^{n}
+- \Delta t \left(
+u_{i,j}^{n} \frac{u_{i+1,j}^{n} - u_{i-1,j}^{n}}{2\Delta x}
++ v_{i+1/2,j}^{n} \frac{u_{i,j+1}^{n} - u_{i,j-1}^{n}}{2\Delta y}
+\right) \nonumber \\
+&- g \frac{\Delta t}{\Delta x} (z_{i+1,j}^{n} - z_{i,j}^{n})
+- \Delta t \gamma u_{i,j}^{n}
++ \Delta t f v_{i,j}^{n},
+\end{align}
+\[
+v_{i+1/2,j}^{n} =
+\frac{1}{4}
+\left(
+v_{i,j}^{n} + v_{i,j-1}^{n} + v_{i+1,j}^{n} + v_{i+1,j-1}^{n}
+\right).
+\]
+
+\begin{align}
+v_{i,j}^{n+1} = &\, v_{i,j}^{n}
+- \Delta t \left(
+u_{i,j+1/2}^{n} \frac{v_{i+1,j}^{n} - v_{i-1,j}^{n}}{2\Delta x}
++ v_{i,j}^{n} \frac{v_{i,j+1}^{n} - v_{i,j-1}^{n}}{2\Delta y}
+\right) \nonumber \\
+&- g \frac{\Delta t}{\Delta y} (z_{i,j+1}^{n} - z_{i,j}^{n})
+- \Delta t \gamma v_{i,j}^{n}
+- \Delta t f u_{i,j}^{n},
+\end{align}
+\[
+u_{i,j+1/2}^{n} =
+\frac{1}{4}
+\left(
+u_{i-1,j}^{n} + u_{i,j}^{n} + u_{i-1,j+1}^{n} + u_{i,j+1}^{n}
+\right).
+\]
+
+\begin{align}
+z_{i,j}^{n+1} = &\, z_{i,j}^{n}
+- \frac{\Delta t}{\Delta x}
+\left(
+H_{i+1/2,j}^{n} u_{i,j}^{n} - H_{i-1/2,j}^{n} u_{i-1,j}^{n}
+\right) \nonumber \\
+&- \frac{\Delta t}{\Delta y}
+\left(
+H_{i,j+1/2}^{n} v_{i,j}^{n} - H_{i,j-1/2}^{n} v_{i,j-1}^{n}
+\right),
+\end{align}
+\[
+H_{i\pm1/2,j}^{n} = \frac{1}{2}(H_{i\pm1,j}^{n}+H_{i,j}^{n}),
+\qquad
+H_{i,j\pm1/2}^{n} = \frac{1}{2}(H_{i,j\pm1}^{n}+H_{i,j}^{n}).
+\]
+
+\section{连续伴随方程}
+
+
+下面采用与 Lorenz-96 一致的通用路线推导伴随方程。其核心是"先线性化，再转置"：
+先将前向方程写成紧凑的向量形式并线性化得到切线性算子 $\mathcal{M}$，
+再通过 $L^2$ 内积下的分部积分求其伴随算子 $\mathcal{M}^\dagger$，
+最后逐项转置得到分量形式的伴随方程。
+
+\subsection{向量形式的前向方程}
+
+将浅水方程写为
+\begin{equation}
+    \frac{\partial \mathbf{w}}{\partial t} = \mathcal{N}(\mathbf{w}), \qquad
+    \mathbf{w} = \begin{pmatrix} u \\ v \\ z \end{pmatrix},
+\end{equation}
+其中非线性算子 $\mathcal{N}$ 的各分量为
+\begin{align}
+    \mathcal{N}_u &= -u\frac{\partial u}{\partial x} - v\frac{\partial u}{\partial y} - g\frac{\partial z}{\partial x} + fv - \gamma u, \label{eq:vec_nu} \\
+    \mathcal{N}_v &= -u\frac{\partial v}{\partial x} - v\frac{\partial v}{\partial y} - g\frac{\partial z}{\partial y} - fu - \gamma v, \label{eq:vec_nv} \\
+    \mathcal{N}_z &= -\frac{\partial}{\partial x}\big[(h+z)u\big] - \frac{\partial}{\partial y}\big[(h+z)v\big]. \label{eq:vec_nz}
+\end{align}
+
+\subsection{切线性模型（TLM）}
+
+设 $(\bar u, \bar v, \bar z)$ 为满足前向方程的参考轨道，令扰动 $\delta\mathbf{w} = (\delta u, \delta v, \delta z)^{\mathsf T}$。将 $\mathbf{w} = \bar{\mathbf{w}} + \delta\mathbf{w}$ 代入 \eqref{eq:vec_nu}--\eqref{eq:vec_nz} 并保留一阶项，得到切线性模型
+\begin{equation}
+    \frac{\partial\,\delta\mathbf{w}}{\partial t} = \mathcal{M}(t)\,\delta\mathbf{w},
+    \label{eq:tlm_operator}
+\end{equation}
+其中线性微分算子 $\mathcal{M}$ 的各分量为
+\begin{align}
+    (\mathcal{M}\,\delta\mathbf{w})_u &=
+    -\bar u\frac{\partial\,\delta u}{\partial x}
+    - \frac{\partial\bar u}{\partial x}\,\delta u
+    - \bar v\frac{\partial\,\delta u}{\partial y}
+    - \frac{\partial\bar u}{\partial y}\,\delta v
+    - g\frac{\partial\,\delta z}{\partial x}
+    + f\,\delta v - \gamma\,\delta u, \label{eq:tlm_u2} \\[4pt]
+    (\mathcal{M}\,\delta\mathbf{w})_v &=
+    -\bar u\frac{\partial\,\delta v}{\partial x}
+    - \frac{\partial\bar v}{\partial x}\,\delta u
+    - \bar v\frac{\partial\,\delta v}{\partial y}
+    - \frac{\partial\bar v}{\partial y}\,\delta v
+    - g\frac{\partial\,\delta z}{\partial y}
+    - f\,\delta u - \gamma\,\delta v, \label{eq:tlm_v2} \\[4pt]
+    (\mathcal{M}\,\delta\mathbf{w})_z &=
+    -\frac{\partial}{\partial x}\big(\bar H\,\delta u + \bar u\,\delta z\big)
+    - \frac{\partial}{\partial y}\big(\bar H\,\delta v + \bar v\,\delta z\big), \label{eq:tlm_z2}
+\end{align}
+其中 $\bar H = h + \bar z$。这组方程就是 PDE 版本的 $\delta\dot{\mathbf{x}} = \mathbf{M}\,\delta\mathbf{x}$：前向轨道 $(\bar u, \bar v, \bar z)$ 扮演了 Lorenz-96 中雅可比矩阵所依赖的参考轨道的角色。
+
+\subsection{伴随算子}
+
+定义时空域上的 $L^2$ 内积
+\begin{equation}
+    \langle \mathbf{p}, \mathbf{q} \rangle
+    = \int_0^T \int_\Omega \big(p_u q_u + p_v q_v + p_z q_z\big)\,dx\,dy\,dt.
+\end{equation}
+算子 $\mathcal{M}$ 的\textbf{伴随算子} $\mathcal{M}^\dagger$ 由下式定义：
+\begin{equation}
+    \langle \mathbf{w}^*, \mathcal{M}\,\delta\mathbf{w} \rangle
+    = \langle \mathcal{M}^\dagger \mathbf{w}^*, \delta\mathbf{w} \rangle
+    + \text{边界项},
+\end{equation}
+其中 $\mathbf{w}^* = (u^*, v^*, z^*)^{\mathsf T}$ 为伴随变量。
+
+\subsection{从拉格朗日函数到伴随方程}
+
+\textbf{拉格朗日函数.}
+前向方程 \eqref{eq:vec_nu}--\eqref{eq:vec_nz} 可写为残差形式
+\begin{equation}
+    \mathbf{R}(\mathbf{w}) \equiv
+    \frac{\partial\mathbf{w}}{\partial t} + \mathbf{S}(\mathbf{w}) = \mathbf{0},
+\end{equation}
+其中 $\mathbf{S}(\mathbf{w})$ 包含所有空间项（平流、压力梯度、科氏力、阻尼）。
+注意前向方程本身是 $\partial_t\mathbf{w} + \mathbf{S}(\mathbf{w}) = \mathbf{0}$，而 TLM \eqref{eq:tlm_operator} 可写为
+$\partial_t(\delta\mathbf{w}) + \mathbf{S}'(\bar{\mathbf{w}})\,\delta\mathbf{w} = \mathbf{0}$，
+因此 $\mathcal{M} = -\mathbf{S}'$（$\mathcal{M}$ 中的负号正是由此而来）。
+
+引入伴随变量 $\mathbf{w}^*$，构造拉格朗日函数
+\begin{equation}
+    \mathcal{L}(\mathbf{w},\mathbf{w}^*)
+    = J(\mathbf{w})
+    + \Big\langle \mathbf{w}^*,\; \mathbf{R}(\mathbf{w}) \Big\rangle.
+    \label{eq:lagrangian}
+\end{equation}
+由于前向解满足 $\mathbf{R}(\mathbf{w})=\mathbf{0}$，有 $\mathcal{L} = J$。但 $\mathcal{L}$ 的变分包含了约束信息，这是我们构造它的目的。
+
+\textbf{一阶变分.}
+对 $\mathcal{L}$ 做变分（为简洁略去终端项，终端情形同理）：
+\begin{equation}
+    \delta\mathcal{L}
+    = \delta J + \Big\langle \mathbf{w}^*,\; \delta\mathbf{R} \Big\rangle
+    = \Big\langle \frac{\partial J}{\partial\mathbf{w}},\; \delta\mathbf{w} \Big\rangle
+      + \Big\langle \mathbf{w}^*,\; \partial_t(\delta\mathbf{w}) - \mathcal{M}\,\delta\mathbf{w} \Big\rangle.
+    \label{eq:deltaL}
+\end{equation}
+这里用了 $\delta\mathbf{R} = \partial_t(\delta\mathbf{w}) + \mathbf{S}'\delta\mathbf{w}
+= \partial_t(\delta\mathbf{w}) - \mathcal{M}\delta\mathbf{w}$。
+
+\textbf{分部积分.}
+对时间导数项做分部积分：
+\[
+    \int_0^T \mathbf{w}^{*\mathsf T}\partial_t(\delta\mathbf{w})\,dt
+    = \mathbf{w}^{*\mathsf T}\delta\mathbf{w}\Big|_0^T
+      - \int_0^T (\partial_t\mathbf{w}^*)^{\mathsf T}\delta\mathbf{w}\,dt.
+\]
+对 $\mathcal{M}$ 项，利用伴随算子的定义 $\langle\mathbf{w}^*,\mathcal{M}\delta\mathbf{w}\rangle
+= \langle\mathcal{M}^\dagger\mathbf{w}^*,\delta\mathbf{w}\rangle$（略去空间边界项），
+代入 \eqref{eq:deltaL} 得
+\begin{equation}
+    \delta\mathcal{L}
+    = \int_0^T\!\!\int_\Omega
+        \Big(\frac{\partial J}{\partial\mathbf{w}}
+            - \frac{\partial\mathbf{w}^*}{\partial t}
+            - \mathcal{M}^\dagger\mathbf{w}^*\Big)^{\mathsf T}\!\!\delta\mathbf{w}
+        \,dx\,dy\,dt
+      + \int_\Omega \mathbf{w}^{*\mathsf T}\delta\mathbf{w}\Big|_0^T dx\,dy.
+    \label{eq:deltaL_ibp}
+\end{equation}
+
+\textbf{伴随方程.}
+上式包含对 $\delta\mathbf{w}(t)$（$t>0$）的积分。为了让 $\delta\mathcal{L}$ 不再显式依赖内部的 $\delta\mathbf{w}$，
+我们\textbf{选择} $\mathbf{w}^*$ 使被积函数的系数恒为零：
+\begin{equation}
+    -\frac{\partial \mathbf{w}^*}{\partial t}
+    = \mathcal{M}^\dagger \mathbf{w}^*
+    - \frac{\partial J}{\partial \mathbf{w}},
+    \label{eq:adj_operator}
+\end{equation}
+并取终端条件 $\mathbf{w}^*(T)=0$（若 $J$ 含终端项则为 $\mathbf{w}^*(T)=-\partial J/\partial\mathbf{w}(T)$，以消去 $t=T$ 处的边界项与 $\delta J$ 终端贡献）。
+方程 \eqref{eq:adj_operator} 就是\textbf{伴随方程}：右端第一项 $\mathcal{M}^\dagger\mathbf{w}^*$ 是 TLM 算子 $\mathcal{M}$ 的转置，
+决定伴随信息如何沿参考轨道反向传播；第二项 $-\partial J/\partial\mathbf{w}$ 是目标函数的梯度，作为反向积分过程中的强迫项。
+
+\textbf{梯度公式.}
+伴随方程 \eqref{eq:adj_operator} 和终端条件满足后，\eqref{eq:deltaL_ibp} 中仅剩 $t=0$ 的边界项。
+由拉格朗日乘子法，目标函数对初值的梯度等于 $\mathcal{L}$ 对 $\mathbf{w}_0$ 的偏导数，即该边界项的系数：
+\[
+    \boxed{\nabla_{\mathbf{w}_0}J = -\mathbf{w}^*(0)}.
+\]
+也就是说，初值梯度由伴随变量在 $t=0$ 的\textbf{负值}给出。
+
+求 $\mathcal{M}^\dagger$ 的本质是把 $\mathcal{M}$ 中的每个微分运算“转置”。对矩阵，转置即交换行列指标；对微分算子，转置即分部积分并把导数移到伴随变量上。假设周期或齐次边界条件（边界项为零），常见项的对应关系如下：
+
+\begin{center}
+\begin{tabular}{c|c}
+\hline
+TLM 中的项 & 伴随中的贡献（作用于 $w^*$，贡献给 $\delta w$ 的系数） \\ \hline
+$a(\mathbf{x})\,\partial_x(\delta u)$ & $-\partial_x(a\,u^*)$ \\
+$\partial_x\big(b(\mathbf{x})\,\delta u\big)$ & $b\,\partial_x(u^*)$ \\
+$c(\mathbf{x})\,\delta u$（无导数项） & $c\,u^*$ \\
+\hline
+\end{tabular}
+\end{center}
+
+这个“字典”是本节的核心：每一项在 TLM 中如何作用于扰动，在伴随中就以转置后的形式作用于伴随变量。下面逐项应用。
+
+\subsection{从 TLM 到伴随方程：逐项转置}
+
+计算 $\langle \mathbf{w}^*, \mathcal{M}\,\delta\mathbf{w} \rangle$，即
+\[
+    \int_0^T \int_\Omega \Big[
+        u^* (\mathcal{M}\,\delta\mathbf{w})_u
+        + v^* (\mathcal{M}\,\delta\mathbf{w})_v
+        + z^* (\mathcal{M}\,\delta\mathbf{w})_z
+    \Big] dx\,dy\,dt,
+\]
+对每项做分部积分，将导数从 $\delta u, \delta v, \delta z$ 转移到 $u^*, v^*, z^*$，最终整理成
+\[
+    \int_0^T \int_\Omega \Big[
+        (\mathcal{M}^\dagger_u\mathbf{w}^*)\,\delta u
+        + (\mathcal{M}^\dagger_v\mathbf{w}^*)\,\delta v
+        + (\mathcal{M}^\dagger_z\mathbf{w}^*)\,\delta z
+    \Big] dx\,dy\,dt.
+\]
+下面逐项列出各 TLM 项及其伴随贡献。为简洁起见，以下省略积分号与边界项，仅写出被积函数中的系数对应关系。
+
+\subsubsection*{来自 $u^* (\mathcal{M}\,\delta\mathbf{w})_u$ 的贡献}
+
+\begin{alignat*}{2}
+    \text{TLM 项} &\quad\longrightarrow\quad & \text{伴随贡献} \\
+    u^*(-\bar u\,\partial_x\delta u) &\;\longrightarrow\; & +\partial_x(\bar u\,u^*)\,\delta u = (\bar u\,\partial_x u^* + u^*\partial_x\bar u)\,\delta u \\
+    u^*(-\bar v\,\partial_y\delta u) &\;\longrightarrow\; & +\partial_y(\bar v\,u^*)\,\delta u = (\bar v\,\partial_y u^* + u^*\partial_y\bar v)\,\delta u \\
+    u^*(-\bar u_x\,\delta u) &\;\longrightarrow\; & -\bar u_x\,u^*\,\delta u \\
+    u^*(-\bar u_y\,\delta v) &\;\longrightarrow\; & -\bar u_y\,u^*\,\delta v \\
+    u^*(-g\,\partial_x\delta z) &\;\longrightarrow\; & +g\,\partial_x u^*\,\delta z \\
+    u^*(+f\,\delta v) &\;\longrightarrow\; & +f\,u^*\,\delta v \\
+    u^*(-\gamma\,\delta u) &\;\longrightarrow\; & -\gamma\,u^*\,\delta u
+\end{alignat*}
+
+\subsubsection*{来自 $v^* (\mathcal{M}\,\delta\mathbf{w})_v$ 的贡献}
+
+\begin{alignat*}{2}
+    \text{TLM 项} &\quad\longrightarrow\quad & \text{伴随贡献} \\
+    v^*(-\bar u\,\partial_x\delta v) &\;\longrightarrow\; & +\partial_x(\bar u\,v^*)\,\delta v = (\bar u\,\partial_x v^* + v^*\partial_x\bar u)\,\delta v \\
+    v^*(-\bar v\,\partial_y\delta v) &\;\longrightarrow\; & +\partial_y(\bar v\,v^*)\,\delta v = (\bar v\,\partial_y v^* + v^*\partial_y\bar v)\,\delta v \\
+    v^*(-\bar v_x\,\delta u) &\;\longrightarrow\; & -\bar v_x\,v^*\,\delta u \\
+    v^*(-\bar v_y\,\delta v) &\;\longrightarrow\; & -\bar v_y\,v^*\,\delta v \\
+    v^*(-g\,\partial_y\delta z) &\;\longrightarrow\; & +g\,\partial_y v^*\,\delta z \\
+    v^*(-f\,\delta u) &\;\longrightarrow\; & -f\,v^*\,\delta u \\
+    v^*(-\gamma\,\delta v) &\;\longrightarrow\; & -\gamma\,v^*\,\delta v
+\end{alignat*}
+
+\subsubsection*{来自 $z^* (\mathcal{M}\,\delta\mathbf{w})_z$ 的贡献}
+
+\begin{alignat*}{2}
+    \text{TLM 项} &\quad\longrightarrow\quad & \text{伴随贡献} \\
+    z^*\big(-\partial_x(\bar H\,\delta u)\big) &\;\longrightarrow\; & +\bar H\,\partial_x z^*\,\delta u \\
+    z^*\big(-\partial_x(\bar u\,\delta z)\big) &\;\longrightarrow\; & +\bar u\,\partial_x z^*\,\delta z \\
+    z^*\big(-\partial_y(\bar H\,\delta v)\big) &\;\longrightarrow\; & +\bar H\,\partial_y z^*\,\delta v \\
+    z^*\big(-\partial_y(\bar v\,\delta z)\big) &\;\longrightarrow\; & +\bar v\,\partial_y z^*\,\delta z
+\end{alignat*}
+
+\subsection{合并：分量形式的伴随方程}
+
+将上述所有贡献按 $\delta u, \delta v, \delta z$ 分别合并，并注意到 $\partial_x\bar u$ 项与 $-\bar u_x$ 项相消、$\partial_y\bar v$ 项与 $-\bar v_y$ 项相消（这是动量方程结构的自然结果），得到：
+
+\begin{itemize}
+    \item \textbf{$\delta u$ 的系数}（即 $\mathcal{M}^\dagger_u\mathbf{w}^*$）：
+    \begin{equation*}
+        \bar u\,\partial_x u^* + \bar v\,\partial_y u^*
+        + \bar H\,\partial_x z^*
+        - \bar v_x\,v^* + \bar v_y\,u^*
+        - \gamma\,u^* - f\,v^*.
+    \end{equation*}
+    \item \textbf{$\delta v$ 的系数}（即 $\mathcal{M}^\dagger_v\mathbf{w}^*$）：
+    \begin{equation*}
+        \bar u\,\partial_x v^* + \bar v\,\partial_y v^*
+        + \bar H\,\partial_y z^*
+        - \bar u_y\,u^* + \bar u_x\,v^*
+        - \gamma\,v^* + f\,u^*.
+    \end{equation*}
+    \item \textbf{$\delta z$ 的系数}（即 $\mathcal{M}^\dagger_z\mathbf{w}^*$）：
+    \begin{equation*}
+        \bar u\,\partial_x z^* + \bar v\,\partial_y z^*
+        + g\big(\partial_x u^* + \partial_y v^*\big).
+    \end{equation*}
+\end{itemize}
+
+代入伴随方程 \eqref{eq:adj_operator}，并将参考轨道的上标略去（$(\bar u,\bar v,\bar z) \to (u,v,z)$，$\bar H \to H = h+z$），得到二维浅水方程的连续伴随系统：
+\begin{align}
+    -\frac{\partial u^*}{\partial t}
+    &= u\frac{\partial u^*}{\partial x}
+     + v\frac{\partial u^*}{\partial y}
+     + (h+z)\frac{\partial z^*}{\partial x}
+     - v^*\frac{\partial v}{\partial x}
+     + u^*\frac{\partial v}{\partial y}
+     - \gamma u^* - f v^*
+     - \frac{\partial J}{\partial u}, \label{eq:adj_u_final} \\[4pt]
+    -\frac{\partial v^*}{\partial t}
+    &= u\frac{\partial v^*}{\partial x}
+     + v\frac{\partial v^*}{\partial y}
+     + (h+z)\frac{\partial z^*}{\partial y}
+     - u^*\frac{\partial u}{\partial y}
+     + v^*\frac{\partial u}{\partial x}
+     - \gamma v^* + f u^*
+     - \frac{\partial J}{\partial v}, \label{eq:adj_v_final} \\[4pt]
+    -\frac{\partial z^*}{\partial t}
+    &= u\frac{\partial z^*}{\partial x}
+     + v\frac{\partial z^*}{\partial y}
+     + g\Big(\frac{\partial u^*}{\partial x} + \frac{\partial v^*}{\partial y}\Big)
+     - \frac{\partial J}{\partial z}. \label{eq:adj_z_final}
+\end{align}
+
+\section{初始时刻梯度}
+
+当伴随方程、终端条件和边界条件都满足时，$\delta \mathcal{L}$ 中只剩 $t=0$ 的边界项 $-\mathbf{w}^*(0)^{\mathsf T}\delta\mathbf{w}_0$。由拉格朗日乘子法，目标函数对初值的梯度即为此边界项的系数，因此
+\[
+\delta J
+= \int_\Omega
+\big(
+- u^*(0)\,\delta u(0)
+- v^*(0)\,\delta v(0)
+- z^*(0)\,\delta z(0)
+\big)\,dx\,dy.
+\]
+若优化变量是初始状态 $\mathbf{x}_0=(u(0),v(0),z(0))$，则有
+\[
+\frac{\partial J}{\partial u(0)} = -u^*(0), \qquad
+\frac{\partial J}{\partial v(0)} = -v^*(0), \qquad
+\frac{\partial J}{\partial z(0)} = -z^*(0).
+\]
+也就是说，4D-Var 中所需的初值梯度，恰好由伴随方程从 $t=T$ 反向积分到 $t=0$ 后取负得到。
+
+这一步是伴随方法最重要的结论。它把一个看似复杂的“对所有初值分量求偏导”的问题，转化成了一次前向积分加一次伴随反向积分。也正因为如此，伴随方法特别适合高维状态空间中的变分同化与参数反演。
+
+\section{连续伴随的直接离散}
+
+若直接对连续伴随方程做显式离散，可写为如下反向时间更新。
+
+\subsection*{$u^*$ 方程}
+\[
+-\frac{\partial u^*}{\partial t}
+= u\frac{\partial u^*}{\partial x}
++ v\frac{\partial u^*}{\partial y}
+- v^*\frac{\partial v}{\partial x}
++ u^* \frac{\partial v}{\partial y}
++ (h+z)\frac{\partial z^*}{\partial x}
+- \gamma u^*
+- f v^*
+- \frac{\partial J}{\partial u},
+\]
+\begin{equation}
+\begin{aligned}
+u_{i,j}^{*n} = u_{i,j}^{*n+1} + \Delta t \bigg[
+& \frac{u_{i,j}^n}{2\Delta x}
+\left( u_{i+1,j}^{*n+1} - u_{i-1,j}^{*n+1} \right)
++ \frac{v_{i,j}^n}{2\Delta y}
+\left( u_{i,j+1}^{*n+1} - u_{i,j-1}^{*n+1} \right) \\
+& - \frac{v_{i,j}^{*n+1}}{2\Delta x}
+\left( v_{i+1,j}^n - v_{i-1,j}^n \right)
++ \frac{h_{i,j}+z_{i,j}^n}{2\Delta x}
+\left( z_{i+1,j}^{*n+1} - z_{i-1,j}^{*n+1} \right) \\
+& - \gamma u_{i,j}^{*n+1}
+- f v_{i,j}^{*n+1}
+\bigg].
+\end{aligned}
+\end{equation}
+上式省略了 $u^* \,\partial_y v$ 的离散项；若要与连续方程完全一致，需要补齐。
+
+\subsection*{$v^*$ 方程}
+\[
+-\frac{\partial v^*}{\partial t}
+= u\frac{\partial v^*}{\partial x}
++ v\frac{\partial v^*}{\partial y}
+- u^*\frac{\partial u}{\partial y}
++ v^* \frac{\partial u}{\partial x}
++ (h+z)\frac{\partial z^*}{\partial y}
+- \gamma v^*
++ f u^*
+- \frac{\partial J}{\partial v},
+\]
+\begin{equation}
+\begin{aligned}
+v_{i,j}^{*n} = v_{i,j}^{*n+1} + \Delta t \bigg[
+& \frac{u_{i,j}^n}{2\Delta x}
+\left( v_{i+1,j}^{*n+1} - v_{i-1,j}^{*n+1} \right)
++ \frac{v_{i,j}^n}{2\Delta y}
+\left( v_{i,j+1}^{*n+1} - v_{i,j-1}^{*n+1} \right) \\
+& - \frac{u_{i,j}^{*n+1}}{2\Delta y}
+\left( u_{i,j+1}^n - u_{i,j-1}^n \right)
++ \frac{h_{i,j}+z_{i,j}^n}{2\Delta y}
+\left( z_{i,j+1}^{*n+1} - z_{i,j-1}^{*n+1} \right) \\
+& - \gamma v_{i,j}^{*n+1}
++ f u_{i,j}^{*n+1}
+\bigg].
+\end{aligned}
+\end{equation}
+上式省略了 $v^* \,\partial_x u$ 的离散项；同样需要视实现补齐。
+
+\subsection*{$z^*$ 方程}
+\[
+-\frac{\partial z^*}{\partial t}
+= u\frac{\partial z^*}{\partial x}
++ v\frac{\partial z^*}{\partial y}
++ g\left(
+\frac{\partial u^*}{\partial x}
++ \frac{\partial v^*}{\partial y}
+\right)
+- \frac{\partial J}{\partial z},
+\]
+\begin{equation}
+\begin{aligned}
+z_{i,j}^{*n} = z_{i,j}^{*n+1} + \Delta t \bigg[
+& \frac{u_{i,j}^{\text{center}}}{2\Delta x}
+\left( z_{i+1,j}^{*n+1} - z_{i-1,j}^{*n+1} \right)
++ \frac{v_{i,j}^{\text{center}}}{2\Delta y}
+\left( z_{i,j+1}^{*n+1} - z_{i,j-1}^{*n+1} \right) \\
+& + g \left(
+\frac{u_{i,j}^{*n+1} - u_{i-1,j}^{*n+1}}{\Delta x}
++ \frac{v_{i,j}^{*n+1} - v_{i,j-1}^{*n+1}}{\Delta y}
+\right)
+\bigg]
+- \Delta t \left( \frac{\partial J}{\partial z} \right)_{i,j}.
+\end{aligned}
+\end{equation}
+
+\section{离散伴随}
+
+连续伴随是“先推导、后离散”；离散伴随则是“先写前向离散，再对离散算子做转置”。对 4D-Var 而言，离散伴随通常更稳妥，因为它保证伴随代码与前向离散严格一致。
+
+设前向一步写成
+\[
+\mathbf{x}^{n+1} = \mathcal{M}(\mathbf{x}^n),
+\]
+线性化后得到切线性模型
+\[
+\delta \mathbf{x}^{n+1}
+= \mathbf{M}_n \, \delta \mathbf{x}^n.
+\]
+相应的离散伴随就是
+\[
+\boldsymbol{\lambda}^n
+= \mathbf{M}_n^{\mathsf T}\boldsymbol{\lambda}^{n+1},
+\]
+因此实现上就是按前向代码的逆序，把每条赋值语句的局部雅可比贡献累加回输入变量。
+
+\subsection*{结合当前前向离散的理解方式}
+
+对你的程序而言，一个时间步并不是单个公式，而是按如下顺序完成的：
+\begin{enumerate}
+    \item 先由 $z^n$ 计算 $H^n = h + z^n$；
+    \item 用 $H_{i\pm1/2}, H_{j\pm1/2}$ 更新连续方程，得到 $z^{n+1}$；
+    \item 计算平流预测量 $F_u, F_v$，其中包含交错平均量 $vu$ 和 $uv$；
+    \item 再加上压力梯度、阻尼和科氏力，得到 $u^{n+1}, v^{n+1}$。
+\end{enumerate}
+
+因此离散伴随在一个反向时间步里，也应按完全相反的逻辑回传灵敏度：
+\begin{enumerate}
+    \item 先把 $u^{n+1}, v^{n+1}$ 对应的伴随量回传到 $F_u, F_v, z^n, u^n, v^n$；
+    \item 再把 $F_u, F_v$ 中的平流项继续回传到邻近网格点；
+    \item 最后处理 $z^{n+1}$ 对 $z^n, u^n, v^n$ 的通量依赖，并且别忘记 $H=h+z$ 这一层依赖。
+\end{enumerate}
+
+\subsection*{压力梯度和线性项的局部反传}
+
+若前向代码中有
+\[
+u_{\text{new}}[i,j]
+= F_u
+- G \,\Delta t_x \left( z[i+1,j]-z[i,j] \right)
+- \Delta t\,\gamma\, u[i,j]
++ f\,\Delta t\, v[i,j],
+\]
+记
+\[
+\lambda_u = \frac{\partial J}{\partial u_{\text{new}}[i,j]},
+\]
+则局部伴随贡献为
+\begin{align*}
+a_{F_u} &\mathrel{+}= \lambda_u, \\
+a_z[i+1,j] &\mathrel{+}= \lambda_u (-G\,\Delta t_x), \\
+a_z[i,j] &\mathrel{+}= \lambda_u (G\,\Delta t_x), \\
+a_u[i,j] &\mathrel{+}= \lambda_u (-\Delta t\,\gamma), \\
+a_v[i,j] &\mathrel{+}= \lambda_u (f\,\Delta t).
+\end{align*}
+
+同理，对
+\[
+v_{\text{new}}[i,j]
+= F_v
+- G \,\Delta t_y \left( z[i,j+1]-z[i,j] \right)
+- \Delta t\,\gamma\, v[i,j]
+- f\,\Delta t\, u[i,j],
+\]
+记
+\[
+\lambda_v = \frac{\partial J}{\partial v_{\text{new}}[i,j]},
+\]
+则局部伴随贡献为
+\begin{align*}
+a_{F_v} &\mathrel{+}= \lambda_v, \\
+a_z[i,j+1] &\mathrel{+}= \lambda_v (-G\,\Delta t_y), \\
+a_z[i,j] &\mathrel{+}= \lambda_v (G\,\Delta t_y), \\
+a_v[i,j] &\mathrel{+}= \lambda_v (-\Delta t\,\gamma), \\
+a_u[i,j] &\mathrel{+}= \lambda_v (-f\,\Delta t).
+\end{align*}
+
+\subsection*{连续方程通量项的反传}
+
+你的连续方程离散为
+\[
+z_{i,j}^{n+1}
+= z_{i,j}^{n}
+- \Delta t_x \left( H_{i+1/2,j} u_{i,j} - H_{i-1/2,j} u_{i-1,j} \right)
+- \Delta t_y \left( H_{i,j+1/2} v_{i,j} - H_{i,j-1/2} v_{i,j-1} \right),
+\]
+其中
+\[
+H_{i+1/2,j} = \frac{1}{2}(H_{i,j}+H_{i+1,j}), \qquad H = h+z.
+\]
+
+若记
+\[
+\lambda_z = \frac{\partial J}{\partial z_{i,j}^{n+1}},
+\]
+那么它至少会向速度分量回传
+\begin{align*}
+a_u[i,j] &\mathrel{+}= \lambda_z \left(-\Delta t_x H_{i+1/2,j}\right), \\
+a_u[i-1,j] &\mathrel{+}= \lambda_z \left(\Delta t_x H_{i-1/2,j}\right), \\
+a_v[i,j] &\mathrel{+}= \lambda_z \left(-\Delta t_y H_{i,j+1/2}\right), \\
+a_v[i,j-1] &\mathrel{+}= \lambda_z \left(\Delta t_y H_{i,j-1/2}\right).
+\end{align*}
+
+同时，由于 $H=h+z$，$z$ 不仅通过显式的首项 $z_{i,j}^n$ 进入，还会通过各个半层厚度进入，因此还要继续向 $z$ 自身回传。比如 $H_{i+1/2,j}$ 这一项会把一半的贡献给 $z_{i,j}$，另一半给 $z_{i+1,j}$。这正是离散伴随中最容易遗漏的部分之一。
+
+\subsection*{平流预测量的反传}
+
+在你的前向程序里，$F_u$ 和 $F_v$ 不是简单的局部函数，而包含中心差分和角点平均。例如
+\[
+F_u
+= u_{i,j}
+- \Delta t
+\left[
+u_{i,j}\frac{u_{i+1,j}-u_{i-1,j}}{2\Delta x}
++ vu_{i,j}\frac{u_{i,j+1}-u_{i,j-1}}{2\Delta y}
+\right],
+\]
+\[
+vu_{i,j}
+= \frac{1}{4}\left(
+v_{i,j}+v_{i,j-1}+v_{i+1,j}+v_{i+1,j-1}
+\right),
+\]
+而 $F_v$ 中则含有
+\[
+uv_{i,j}
+= \frac{1}{4}\left(
+u_{i-1,j}+u_{i,j}+u_{i-1,j+1}+u_{i,j+1}
+\right).
+\]
+
+这意味着伴随回传时会出现两个层次：
+\begin{enumerate}
+    \item 先把 $a_{F_u}$ 和 $a_{F_v}$ 回传到差分项与平均量 $vu, uv$；
+    \item 再把 $a_{vu}$、$a_{uv}$ 以四分之一的权重分摊回四个角点上的速度分量。
+\end{enumerate}
+所以，和连续伴随相比，离散伴随最鲜明的特点是“每个前向插值或平均操作都必须有一个对应的转置累加操作”。
+
+\subsection*{与当前代码实现的对应}
+
+在当前的 \texttt{swe\_run\_adjoint} 中，你已经按存储轨线
+\[
+u^n,\quad v^n,\quad z^n,\quad H^n=h+z^n
+\]
+逐步反向更新时间层，并采用了与前向格式一致的中心差分和局部平均。代码中的三个核心增量可概括写成
+\[
+\delta z^* = \Delta t \left[
+G\left(\nabla_x u^* + \nabla_y v^*\right)
++ \text{adv}_x(z^*)
++ \text{adv}_y(z^*)
+\right],
+\]
+\[
+\delta u^* = \Delta t \left[
+H_{u}\,\nabla_x z^*
++ u\,\nabla_x u^*
++ v_{\mathrm{avg}}\,\nabla_y u^*
+- v_{\mathrm{avg}}^*\,\nabla_x v
+- \gamma u^*
+- f\,v_{\mathrm{avg}}^*
+\right],
+\]
+\[
+\delta v^* = \Delta t \left[
+H_{v}\,\nabla_y z^*
++ u_{\mathrm{avg}}\,\nabla_x v^*
++ v\,\nabla_y v^*
+- u_{\mathrm{avg}}^*\,\nabla_y u
+- \gamma v^*
++ f\,u_{\mathrm{avg}}^*
+\right].
+\]
+这里的 $H_u, H_v, u_{\mathrm{avg}}, v_{\mathrm{avg}}$ 正对应前向离散中的半格点厚度和角点平均速度。这一写法的优点是结构清楚，且与前向代码中的空间离散完全同源，便于做梯度检验。
+
+最后再强调一次，这里使用 ``\texttt{+=}'' 不是编码习惯问题，而是离散链式法则的直接结果：同一个网格点变量通常通过多条路径影响目标函数，因此其伴随值必须累加所有来源的贡献。
+
+\section{总结}
+
+本文只保留三条最关键的结论：
+\begin{enumerate}
+    \item 连续伴随由前向方程线性化得到切线性算子 $\mathcal{M}$，再通过分部积分求其伴随算子 $\mathcal{M}^\dagger$，最终写出分量方程并沿时间反向积分。
+    \item 初值梯度由伴随变量在 $t=0$ 的值取负给出，即 $\nabla_{\mathbf{w}_0}J = -\mathbf{w}^*(0)$。
+    \item 真正用于代码时，更推荐直接构造离散伴随，因为它与前向离散完全一致，便于做梯度检验。
+\end{enumerate}
+
+
+\end{document}
