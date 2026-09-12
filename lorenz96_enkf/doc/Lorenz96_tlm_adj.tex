@@ -1,0 +1,85 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath, amssymb}
+\usepackage[margin=1in]{geometry}
+
+\title{\textbf{Derivation of the Adjoint Model for the Standard Lorenz-96 System}}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+This document derives the adjoint model for the standard Lorenz-96 system. It integrates the forward model, tangent-linear model (TLM), and Jacobian entries provided in the original problem statement with the formal steps of adjoint derivation.
+
+\section{Forward Model and Tangent-Linear Model (TLM)}
+
+The standard Lorenz-96 system is defined by the following set of ordinary differential equations:
+\begin{equation}
+    \frac{dx_k}{dt} = x_{k-1}(x_{k+1} - x_{k-2}) - x_k + F, \quad k = 1, \dots, N,
+\end{equation}
+with cyclic indices $x_{k+N} = x_k$.
+
+To obtain the tangent-linear model (TLM), we linearize the system about a nonlinear trajectory $x_k(t)$. Let $\delta x_k$ be the perturbation. The resulting TLM is:
+\begin{equation}
+    \frac{d \delta x_k}{dt} = (x_{k+1} - x_{k-2}) \delta x_{k-1} + x_{k-1} \delta x_{k+1} - x_{k-1} \delta x_{k-2} - \delta x_k.
+\end{equation}
+
+Equivalently, in vector form, the TLM is written as:
+\begin{equation}
+    \frac{d \delta \mathbf{x}}{dt} = \mathbf{M}(t) \delta \mathbf{x}, \quad \delta \mathbf{x} = \begin{pmatrix} \delta x_1 \\ \vdots \\ \delta x_N \end{pmatrix},
+\end{equation}
+where the Jacobian matrix $\mathbf{M}(t)$ has the following non-zero entries (all indices are modulo $N$):
+\begin{align}
+    M_{k,k-1} &= x_{k+1} - x_{k-2}, \\
+    M_{k,k+1} &= x_{k-1}, \\
+    M_{k,k-2} &= -x_{k-1}, \\
+    M_{k,k} &= -1.
+\end{align}
+
+\section{Adjoint Model Formulation}
+
+The adjoint model describes the evolution of the adjoint state vector $\delta \mathbf{x}^*$. In continuous time, the adjoint equation is defined using the transpose of the Jacobian matrix, integrated backward in time:
+\begin{equation}
+    -\frac{d \delta \mathbf{x}^*}{dt} = \mathbf{M}^T(t) \delta \mathbf{x}^*,
+\end{equation}
+or equivalently:
+\begin{equation}
+    \frac{d \delta \mathbf{x}^*}{dt} = -\mathbf{M}^T(t) \delta \mathbf{x}^*.
+\end{equation}
+
+\section{Deriving the Transposed Jacobian $\mathbf{M}^T(t)$}
+
+To find the adjoint equations in component form, we need the entries of the transposed Jacobian $\mathbf{M}^T$. By definition, $(M^T)_{i, j} = M_{j, i}$. We find the non-zero entries of $\mathbf{M}^T$ for a generic row $k$ (which corresponds to column $k$ of $\mathbf{M}$):
+\begin{align*}
+    \text{From } M_{k+1, k} = x_{k+2} - x_{k-1}, \quad &\text{we get} \quad (M^T)_{k, k+1} = x_{k+2} - x_{k-1}, \\
+    \text{From } M_{k-1, k} = x_{k-2}, \quad &\text{we get} \quad (M^T)_{k, k-1} = x_{k-2}, \\
+    \text{From } M_{k+2, k} = -x_{k+1}, \quad &\text{we get} \quad (M^T)_{k, k+2} = -x_{k+1}, \\
+    \text{From } M_{k, k} = -1, \quad &\text{we get} \quad (M^T)_{k, k} = -1.
+\end{align*}
+
+\section{Component Form of the Adjoint Equations}
+
+Using the definition of the adjoint equation $-\frac{d \delta x_k^*}{dt} = \sum_j (M^T)_{k, j} \delta x_j^*$, we substitute the non-zero entries of $\mathbf{M}^T$:
+\begin{equation}
+    -\frac{d \delta x_k^*}{dt} = (M^T)_{k, k+1} \delta x_{k+1}^* + (M^T)_{k, k-1} \delta x_{k-1}^* + (M^T)_{k, k+2} \delta x_{k+2}^* + (M^T)_{k, k} \delta x_k^*.
+\end{equation}
+
+Substituting the values derived in Section 3:
+\begin{equation}
+    -\frac{d \delta x_k^*}{dt} = (x_{k+2} - x_{k-1}) \delta x_{k+1}^* + x_{k-2} \delta x_{k-1}^* - x_{k+1} \delta x_{k+2}^* - \delta x_k^*.
+\end{equation}
+
+\section{Final Adjoint Model}
+
+Finally, multiply the entire equation by $-1$ to isolate the time derivative, and rearrange the terms to clearly show the adjoint dynamics:
+\begin{equation}
+    \boxed{\frac{d \delta x_k^*}{dt} = -x_{k-2} \delta x_{k-1}^* + (x_{k-1} - x_{k+2}) \delta x_{k+1}^* + x_{k+1} \delta x_{k+2}^* + \delta x_k^*}
+\end{equation}
+with cyclic indices $\delta x_{k+N}^* = \delta x_k^*$ and $x_{k+N} = x_k$.
+
+\vspace{0.5cm}
+\noindent \textbf{Important Integration Note:}
+While the tangent-linear model is integrated forward in time (from $t=0$ to $t=T$), the adjoint model must be integrated \textbf{backward in time} (from $t=T$ to $t=0$). The ``initial'' condition for this backward integration is the adjoint state at the final time $T$, typically derived from a cost function gradient.
+
+\end{document}
