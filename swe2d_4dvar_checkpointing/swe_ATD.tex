@@ -1,0 +1,369 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[fontset=none]{ctex}
+\setCJKmainfont{SimSun}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+
+\hypersetup{colorlinks,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setlength{\headheight}{15pt}
+\setlength{\emergencystretch}{3em}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{二维浅水方程 4D-Var 离散伴随}
+\fancyhead[R]{\thepage}
+
+\title{二维浅水方程 4D-Var 离散伴随说明\\
+\large 原版程序的历史说明（见 \texttt{baseline/original.c}）}
+\author{杨鹏亮}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\noindent\textbf{版本说明（2026-10-16）：}本文保留为原版程序的推导和实验记录，
+不描述现行实现。现行代码使用检查点重算伴随、相关背景协方差和白化控制变量，
+以 SciPy L-BFGS-B 优化；配置、验证和新实验结果见 \texttt{README.md}、
+\texttt{RESULTS.md} 与 \texttt{var\_output/summary.json}。
+
+
+\begin{abstract}
+本文只记录当前程序 \texttt{swe2d\_4dvar.c} 实际实现的离散伴随。
+前向模式是二维浅水方程的有限体积离散，界面通量为 Rusanov 通量，
+时间推进为两次 Euler 子步组成的 RK2。4D-Var 控制变量是初始全状态，
+观测只抽取若干网格点上的水深。梯度由完整前向轨道、逐步反向的
+离散伴随和背景项共同组成。本文不再推导连续伴随 PDE，因为代码没有
+使用连续伴随后再离散的路线。
+\end{abstract}
+
+\tableofcontents
+
+\section{状态、网格和代价函数}
+
+单元状态为守恒变量
+\[
+\mathbf{q}_{i,j} =
+\begin{pmatrix}
+h_{i,j}\\
+(hu)_{i,j}\\
+(hv)_{i,j}
+\end{pmatrix}.
+\]
+代码中一个完整场用三个数组 \texttt{h}, \texttt{hu}, \texttt{hv} 保存，
+单元索引为
+\[
+k=i+N_x j.
+\]
+
+当前 4D-Var 只优化初始场 $\mathbf{Q}^0\in\mathbb{R}^{3N}$。背景场记为
+$\mathbf{Q}_b$，观测位于每个同化窗口末端。代价函数为
+\begin{equation}
+J(\mathbf{Q}^0)
+=
+\frac12(\mathbf{Q}^0-\mathbf{Q}_b)^T B^{-1}(\mathbf{Q}^0-\mathbf{Q}_b)
++\frac12\sum_{c=1}^{N_c}
+\left(H\mathbf{Q}^{n_c}-\mathbf{y}_c\right)^T
+R^{-1}
+\left(H\mathbf{Q}^{n_c}-\mathbf{y}_c\right).
+\label{eq:cost}
+\end{equation}
+这里 $N=N_xN_y$，$n_c=c\,\mathtt{VAR\_STEPS\_WINDOW}$。
+$H$ 是观测算子，从全状态中抽取观测单元的水深 $h$ 分量：
+\[
+H\mathbf{Q}^{n_c}
+=
+\left(h_{o_1}^{n_c},\ldots,h_{o_{N_{\rm obs}}}^{n_c}\right)^T,
+\]
+其中 $o_p$ 是第 $p$ 个观测单元索引。
+
+矩阵 $B$ 是背景误差协方差矩阵；当前代码采用逐格点、逐变量独立的对角形式
+\[
+B=\operatorname{diag}\left(
+\sigma_h^2 I_N,\,
+\sigma_m^2 I_N,\,
+\sigma_m^2 I_N
+\right).
+\]
+矩阵 $R$ 是观测误差协方差矩阵；当前代码假设所有水深观测误差相互独立且方差相同，
+\[
+R=\sigma_o^2 I_{N_{\rm obs}}.
+\]
+因此式 \eqref{eq:cost} 展开后正是代码中
+\texttt{evaluate\_cost\_gradient()} 计算的逐分量加权平方和。
+
+\section{前向离散模式}
+
+\subsection{物理通量}
+
+令 $m=hu$，$n=hv$。物理通量为
+\begin{equation}
+\mathbf{f}(\mathbf{q}) =
+\begin{pmatrix}
+m\\
+m^2/h+\frac12 g h^2\\
+mn/h
+\end{pmatrix},
+\qquad
+\mathbf{g}(\mathbf{q}) =
+\begin{pmatrix}
+n\\
+mn/h\\
+n^2/h+\frac12 g h^2
+\end{pmatrix}.
+\label{eq:physical-flux}
+\end{equation}
+代码在分母中使用 \texttt{safe\_h()}，即 $h$ 小于 \texttt{HMIN} 时用
+\texttt{HMIN} 代替。
+
+\subsection{Rusanov 通量}
+
+$x$ 方向界面通量为
+\begin{equation}
+\widehat{\mathbf{f}}(\mathbf{q}_L,\mathbf{q}_R)
+=
+\frac12\left[\mathbf{f}(\mathbf{q}_L)+\mathbf{f}(\mathbf{q}_R)\right]
+-\frac12 s(\mathbf{q}_R-\mathbf{q}_L),
+\label{eq:rusanov-x}
+\end{equation}
+其中
+\[
+s=\max(a_L,a_R),
+\qquad
+a(\mathbf{q})=|u|+\sqrt{g h},
+\qquad
+u=m/h.
+\]
+$y$ 方向完全类似，只是速度用 $v=n/h$：
+\[
+a_y(\mathbf{q})=|v|+\sqrt{g h}.
+\]
+这些式子对应 \texttt{rusanov\_x()} 和 \texttt{rusanov\_y()}。
+
+\subsection{Euler 子步}
+
+\texttt{euler\_update()} 实现
+\begin{equation}
+\mathbf{q}_{i,j}^{+}
+=
+\mathbf{q}_{i,j}
+-\frac{\Delta t}{\Delta x}
+\left(
+\widehat{\mathbf{f}}_{i+1/2,j}
+-\widehat{\mathbf{f}}_{i-1/2,j}
+\right)
+-\frac{\Delta t}{\Delta y}
+\left(
+\widehat{\mathbf{g}}_{i,j+1/2}
+-\widehat{\mathbf{g}}_{i,j-1/2}
+\right).
+\label{eq:euler}
+\end{equation}
+越界邻居由 \texttt{get\_state\_bc()} 钳制到最近的边界单元，因此边界是
+离散零梯度延拓。
+
+\subsection{RK2 步}
+
+\texttt{step\_rk2\_store()} 使用
+\begin{align}
+\mathbf{Q}^{(1)} &= E(\mathbf{Q}^n),\\
+\mathbf{Q}^{(2)} &= E(\mathbf{Q}^{(1)}),\\
+\mathbf{Q}^{n+1} &= \frac12\mathbf{Q}^{n}+\frac12\mathbf{Q}^{(2)}.
+\label{eq:rk2}
+\end{align}
+其中 $E$ 是式 \eqref{eq:euler} 的 Euler 子步。代码保存
+\texttt{traj[n]} 和 \texttt{stage1[n]}，分别对应 $\mathbf{Q}^n$ 和
+$\mathbf{Q}^{(1)}$，供离散伴随反向使用。
+
+\section{界面通量的 Jacobian}
+
+离散伴随需要 Rusanov 通量对两侧状态的导数。物理通量 Jacobian 为
+\begin{equation}
+A(\mathbf{q})=\frac{\partial\mathbf{f}}{\partial\mathbf{q}}
+=
+\begin{pmatrix}
+0 & 1 & 0\\
+gh-m^2/h^2 & 2m/h & 0\\
+-mn/h^2 & n/h & m/h
+\end{pmatrix},
+\label{eq:Ax}
+\end{equation}
+\begin{equation}
+B(\mathbf{q})=\frac{\partial\mathbf{g}}{\partial\mathbf{q}}
+=
+\begin{pmatrix}
+0 & 0 & 1\\
+-mn/h^2 & n/h & m/h\\
+gh-n^2/h^2 & 0 & 2n/h
+\end{pmatrix}.
+\label{eq:Ay}
+\end{equation}
+代码中的 \texttt{flux\_jacobian\_x()} 和 \texttt{flux\_jacobian\_y()}
+还包含 \texttt{safe\_h()} 分支：当原始 $h\le\mathtt{HMIN}$ 时，关于
+$h$ 的导数被置零，以匹配前向分支。
+
+对 $x$ 方向 Rusanov 通量，定义
+\[
+\Delta\mathbf{q}=\mathbf{q}_R-\mathbf{q}_L.
+\]
+若 $a_L\ge a_R$，则 $s=a_L$，$\nabla_{\mathbf{q}_L}s=\nabla a_L$，
+$\nabla_{\mathbf{q}_R}s=0$；否则相反。于是
+\begin{align}
+\widehat{F}_L
+&=
+\frac12 A(\mathbf{q}_L)+\frac12sI
+-\frac12\Delta\mathbf{q}\,(\nabla_{\mathbf{q}_L}s)^{T},
+\label{eq:FL}\\
+\widehat{F}_R
+&=
+\frac12 A(\mathbf{q}_R)-\frac12sI
+-\frac12\Delta\mathbf{q}\,(\nabla_{\mathbf{q}_R}s)^{T}.
+\label{eq:FR}
+\end{align}
+这正是 \texttt{rusanov\_x\_jacobians()} 的计算。$y$ 方向的
+\texttt{rusanov\_y\_jacobians()} 用同样公式，只把左右状态换成
+bottom/top 状态，并用 $B(\mathbf{q})$ 和 $a_y$。
+
+速度导数在代码中为
+\begin{equation}
+\nabla a_x =
+\begin{pmatrix}
+-\operatorname{sgn}(u)m/h^2+\frac12 g/\sqrt{gh}\\
+\operatorname{sgn}(u)/h\\
+0
+\end{pmatrix},
+\qquad
+\nabla a_y =
+\begin{pmatrix}
+-\operatorname{sgn}(v)n/h^2+\frac12 g/\sqrt{gh}\\
+0\\
+\operatorname{sgn}(v)/h
+\end{pmatrix}.
+\label{eq:wavespeed-grad}
+\end{equation}
+在 $u=0$ 或 $v=0$ 时，\texttt{signum()} 返回零。
+
+\section{Euler 子步的离散伴随}
+
+设某个输出单元 $(i,j)$ 的伴随为
+\[
+\bm{\lambda}_{i,j}^{+}
+=
+\begin{pmatrix}
+\lambda_h^+\\
+\lambda_{hu}^+\\
+\lambda_{hv}^+
+\end{pmatrix}.
+\]
+\texttt{euler\_adjoint()} 对每个输出单元做反向累加。首先，前向 Euler
+子步中有恒等项 $\mathbf{q}_{i,j}^{+}\leftarrow\mathbf{q}_{i,j}$，因此
+\[
+\bm{\lambda}_{i,j}\mathrel{+}= \bm{\lambda}_{i,j}^{+}.
+\]
+
+然后四个界面按前向式 \eqref{eq:euler} 中的符号回传：
+\begin{align}
+\text{右界面:}\quad
+\bm{\lambda}_{i,j}   &\mathrel{+}= -\frac{\Delta t}{\Delta x}\widehat{F}_L^T\bm{\lambda}_{i,j}^{+},
+&
+\bm{\lambda}_{i+1,j} &\mathrel{+}= -\frac{\Delta t}{\Delta x}\widehat{F}_R^T\bm{\lambda}_{i,j}^{+},
+\label{eq:adj-right}\\
+\text{左界面:}\quad
+\bm{\lambda}_{i-1,j} &\mathrel{+}=  \frac{\Delta t}{\Delta x}\widehat{F}_L^T\bm{\lambda}_{i,j}^{+},
+&
+\bm{\lambda}_{i,j}   &\mathrel{+}=  \frac{\Delta t}{\Delta x}\widehat{F}_R^T\bm{\lambda}_{i,j}^{+},
+\label{eq:adj-left}\\
+\text{上界面:}\quad
+\bm{\lambda}_{i,j}   &\mathrel{+}= -\frac{\Delta t}{\Delta y}\widehat{G}_B^T\bm{\lambda}_{i,j}^{+},
+&
+\bm{\lambda}_{i,j+1} &\mathrel{+}= -\frac{\Delta t}{\Delta y}\widehat{G}_T^T\bm{\lambda}_{i,j}^{+},
+\label{eq:adj-top}\\
+\text{下界面:}\quad
+\bm{\lambda}_{i,j-1} &\mathrel{+}=  \frac{\Delta t}{\Delta y}\widehat{G}_B^T\bm{\lambda}_{i,j}^{+},
+&
+\bm{\lambda}_{i,j}   &\mathrel{+}=  \frac{\Delta t}{\Delta y}\widehat{G}_T^T\bm{\lambda}_{i,j}^{+}.
+\label{eq:adj-bottom}
+\end{align}
+矩阵转置乘向量由 \texttt{add\_matT\_vec\_to\_cell()} 完成。
+
+边界处使用和前向相同的钳制索引。例如 $i=0$ 时，左邻居仍然是
+$i=0$；因此边界单元会收到来自自身和钳制 ghost 路径的累加贡献。
+这不是连续边界条件的近似，而是前向离散索引映射的精确转置。
+
+\section{RK2 步的离散伴随}
+
+由式 \eqref{eq:rk2} 可得反向顺序：
+\begin{align}
+\bm{\Lambda}^{(2)} &= \frac12\bm{\Lambda}^{n+1},\\
+\bm{\Lambda}^{n}   &= \frac12\bm{\Lambda}^{n+1},\\
+\bm{\Lambda}^{(1)} &= E'(\mathbf{Q}^{(1)})^T\bm{\Lambda}^{(2)},\\
+\bm{\Lambda}^{n}   &\mathrel{+}= E'(\mathbf{Q}^{n})^T\bm{\Lambda}^{(1)}.
+\label{eq:rk2-adj}
+\end{align}
+这对应 \texttt{rk2\_adjoint\_step()}：
+\begin{itemize}
+\item \texttt{lam\_stage2} 接收 $\frac12\bm{\Lambda}^{n+1}$；
+\item \texttt{lam\_n} 先接收 $\frac12\bm{\Lambda}^{n+1}$；
+\item 在 \texttt{Q1} 上调用一次 \texttt{euler\_adjoint()}；
+\item 在 \texttt{Qn} 上再调用一次 \texttt{euler\_adjoint()}；
+\item 最后把第二次反传结果累加到 \texttt{lam\_n}。
+\end{itemize}
+
+\section{观测项和全窗口梯度}
+
+观测算子只抽取水深：
+\[
+H\mathbf{Q}^{n_c}
+=
+\left(
+h_{o_1}^{n_c},\ldots,h_{o_{N_{\rm obs}}}^{n_c}
+\right)^T.
+\]
+因此在观测时刻只向 $h$ 分量注入
+\begin{equation}
+\lambda_h(o_p)\mathrel{+}=
+\frac{h_{o_p}^{n_c}-y_{c,p}}{\sigma_o^2}.
+\label{eq:obs-adj}
+\end{equation}
+这对应 \texttt{obs\_gradient\_add()}。
+
+\texttt{evaluate\_cost\_gradient()} 的顺序是：
+\begin{enumerate}
+\item 从当前初值 \texttt{x0} 前向积分，保存 \texttt{traj} 和 \texttt{stage1}；
+\item 计算背景项，并把背景项梯度写入 \texttt{grad}；
+\item 遍历所有观测时刻，累计观测代价；
+\item 从末时刻反向到初始时刻；若当前时间层是观测时刻，先执行式
+      \eqref{eq:obs-adj}，再反传一个 RK2 步；
+\item 把回到 $t=0$ 的伴随 \texttt{lam\_curr} 加到背景项梯度上。
+\end{enumerate}
+最终梯度为
+\begin{equation}
+\nabla_{\mathbf{Q}^0}J
+=
+B^{-1}(\mathbf{Q}^0-\mathbf{Q}_b)+\bm{\Lambda}^{0},
+\label{eq:grad}
+\end{equation}
+其中 $B$ 是对角矩阵，每个单元对应
+\[
+\operatorname{diag}(\sigma_h^2,\sigma_m^2,\sigma_m^2).
+\]
+
+
+\section{结论}
+
+当前程序实现的是离散伴随，不是连续伴随 PDE 的再离散。保持一致的关键是：
+\begin{enumerate}
+\item 使用和前向完全相同的 Rusanov 分支、边界钳制和固定时间步长；
+\item 对 Euler 子步逐界面累加 Jacobian 转置贡献；
+\item 对 RK2 严格按组合映射反向传播；
+\item 在观测时刻只向被观测水深分量注入 $R^{-1}(H\mathbf{Q}-\mathbf{y})$；
+\item 最后把初始伴随加到背景项梯度上。
+\end{enumerate}
+这些步骤与 \texttt{swe2d\_4dvar.c} 中的函数调用顺序一一对应。
+
+\end{document}

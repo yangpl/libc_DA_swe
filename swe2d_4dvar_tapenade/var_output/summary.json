@@ -1,0 +1,127 @@
+{
+  "config": {
+    "output": "var_output",
+    "nx": 60,
+    "ny": 60,
+    "dt": 0.001,
+    "stride": 20,
+    "checkpoint_budget": 8,
+    "cycles": 15,
+    "forecast_cycles": 10,
+    "sensors_side": 6,
+    "obs_std": 0.003,
+    "sigma_h": 0.03,
+    "sigma_m": 0.015,
+    "length": 0.06,
+    "maxiter": 400,
+    "seed": 20261016
+  },
+  "optimizer": {
+    "success": true,
+    "message": "CONVERGENCE: REL_REDUCTION_OF_F_<=_FACTR*EPSMCH",
+    "iterations": 308,
+    "evaluations": 341,
+    "rejected_trials": 0
+  },
+  "adjoint": {
+    "backend": "Tapenade reverse C / native binomial scheduler",
+    "checkpoint_budget": 8
+  },
+  "initial_cost": 11809.436263850517,
+  "final_cost": 276.4642160166054,
+  "final_gradient_inf": 0.00014646957675777672,
+  "gradient_check_best_relative_errors": [
+    3.3131668901760964e-10,
+    1.291643254882182e-10,
+    1.485566926071126e-09
+  ],
+  "assimilation_rmse": {
+    "background": [
+      0.021144870700541694,
+      0.03226864729406922,
+      0.042347404027055904
+    ],
+    "analysis": [
+      0.0026343569746194724,
+      0.00890184467287077,
+      0.008278561405044212
+    ]
+  },
+  "forecast_rmse": {
+    "background": [
+      0.020292011555946884,
+      0.05161886740262786,
+      0.05504454739154646
+    ],
+    "analysis": [
+      0.000518381858480369,
+      0.005591989433009137,
+      0.0054103412370939755
+    ]
+  },
+  "training_obs_rmse": {
+    "background": 0.019840561369620664,
+    "analysis": 0.002784127150865886
+  },
+  "held_out_obs_rmse": {
+    "background": 0.02044503155439442,
+    "analysis": 0.0034941415954714153
+  },
+  "diagnostics": {
+    "truth": {
+      "min_depth": 0.9608305088183241,
+      "max_cfl": 0.4126771369975891
+    },
+    "background": {
+      "min_depth": 0.915459544074126,
+      "max_cfl": 0.412060228221456
+    },
+    "analysis": {
+      "min_depth": 0.9591205412804742,
+      "max_cfl": 0.41378472959298906
+    }
+  },
+  "elapsed_seconds": 383.10588056600045,
+  "environment": {
+    "tapenade_runtime": {
+      "inputs": {
+        "adkit": "/home/yangp/Install/tapenade_3.16/ADFirstAidKit",
+        "upstream_sha256": {
+          "adStack.c": "fe26ba0b06300ed1447efec89eb6c03ceabf1f7b6a4ed52296a852b788a24b96",
+          "adStack.h": "5d1ebb4c0e3e1dd8a207a57b6b802de5a8d4c97856258aa283e3dfe9ef910d58",
+          "adBinomial.c": "7a0e24e9982b2f588a17d3ba3ff64811ea9a95f824f3a74bc67d5d3fa60e1ffe",
+          "adBinomial.h": "258290f3a70e77329a1f42ba24051896a62c19fd13dcbf1c30ce25623dd917c9",
+          "adComplex.h": "ef14dbff545b865bef1bff91bfcf32caad67534affb8e93c726eb828d3e764f7",
+          "LICENSE.html": "19bfb2d77652972346ca7c758cb49014696f45d55ff71067635da38ce90b719c"
+        },
+        "patch_sha256": "75a9d5c3c1d2351f5a42b1b39a1d34df66fea08a09e0e793a2eac88a0ecd8229",
+        "preparer_sha256": "d73236f52086d35e3c8560fb3a52f3e6a89413ce653df9966c26eeddf8bd2972"
+      },
+      "sha256": {
+        "adStack.c": "c282c93852299d5f3b79686c2fdf36bb10ad43261bcbfcf2608570b1c84613b2",
+        "adStack.h": "5d1ebb4c0e3e1dd8a207a57b6b802de5a8d4c97856258aa283e3dfe9ef910d58",
+        "adBinomial.c": "7a0e24e9982b2f588a17d3ba3ff64811ea9a95f824f3a74bc67d5d3fa60e1ffe",
+        "adBinomial.h": "258290f3a70e77329a1f42ba24051896a62c19fd13dcbf1c30ce25623dd917c9",
+        "adComplex.h": "ef14dbff545b865bef1bff91bfcf32caad67534affb8e93c726eb828d3e764f7",
+        "LICENSE.html": "19bfb2d77652972346ca7c758cb49014696f45d55ff71067635da38ce90b719c"
+      }
+    },
+    "python": "3.12.3",
+    "numpy": "1.26.4",
+    "scipy": "1.13.1",
+    "source_sha256": {
+      "swe2d_4dvar.c": "3adbdb6d462b477c4b5dbfd96ec81dd87c3cb3bab713393333fb95236783c8cf",
+      "swe2d_4dvar.h": "b58503ed038ea649082860b03c2744d47cb178cd5636b21c632682ebe666e1c8",
+      "swe.py": "d8572571536840cecf8733c1839bba44ee575993e171366929553c15da681c35",
+      "assimilate.py": "d60703dbdba3b0e9c3de4eae235384cc18522e31727cfd2fef99938e2bf5ba1d",
+      "swe_primal.c": "7aa132ece8d4a494a07a0e41789b88f3c93d0d0c3d23f700c630be52ad9cf17f",
+      "tapenade_out/swe_adjoint_b.c": "75c398c9aafd188a11faefe9cfc405da1336153291fd5cc73146f49ff36c3467",
+      "generate_adjoint.py": "852bbaa68e5626ff12dbc5032c1f8cd9c946e6884f79364464069547f4995423",
+      "fix_tapenade_c.py": "855e3347c491b2a5f5e0ac2c3aaba82d88a1d5a8524e942db7634838fd1a84cb",
+      "prepare_tapenade_runtime.py": "d73236f52086d35e3c8560fb3a52f3e6a89413ce653df9966c26eeddf8bd2972",
+      "tapenade_alignment.patch": "75a9d5c3c1d2351f5a42b1b39a1d34df66fea08a09e0e793a2eac88a0ecd8229",
+      ".build/tapenade_runtime/adStack.c": "c282c93852299d5f3b79686c2fdf36bb10ad43261bcbfcf2608570b1c84613b2",
+      ".build/tapenade_runtime/adBinomial.c": "7a0e24e9982b2f588a17d3ba3ff64811ea9a95f824f3a74bc67d5d3fa60e1ffe"
+    }
+  }
+}

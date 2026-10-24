@@ -1,0 +1,109 @@
+{
+  "config": {
+    "output": "var_output_tapenade",
+    "nx": 60,
+    "ny": 60,
+    "dt": 0.001,
+    "stride": 20,
+    "checkpoint_budget": 8,
+    "cycles": 15,
+    "forecast_cycles": 10,
+    "sensors_side": 6,
+    "obs_std": 0.003,
+    "sigma_h": 0.03,
+    "sigma_m": 0.015,
+    "length": 0.06,
+    "maxiter": 400,
+    "seed": 20261016
+  },
+  "optimizer": {
+    "success": true,
+    "message": "CONVERGENCE: REL_REDUCTION_OF_F_<=_FACTR*EPSMCH",
+    "iterations": 309,
+    "evaluations": 345,
+    "rejected_trials": 0
+  },
+  "adjoint": {
+    "backend": "Tapenade reverse C / native binomial scheduler",
+    "checkpoint_budget": 8,
+    "last_evaluation": {
+      "forward_steps": 1280,
+      "reverse_steps": 300,
+      "peak_snapshots": 8,
+      "snapshot_pushes": 167,
+      "snapshot_restores": 299,
+      "tape_bytes_after": 0
+    }
+  },
+  "initial_cost": 11809.436263850517,
+  "final_cost": 276.4642160157128,
+  "final_gradient_inf": 2.429249653093657e-05,
+  "gradient_check_best_relative_errors": [
+    3.3131668901760964e-10,
+    1.291643254882182e-10,
+    1.485566926071126e-09
+  ],
+  "assimilation_rmse": {
+    "background": [
+      0.021144870700541694,
+      0.03226864729406922,
+      0.042347404027055904
+    ],
+    "analysis": [
+      0.0026343560079892083,
+      0.00890184164060981,
+      0.008278564396461928
+    ]
+  },
+  "forecast_rmse": {
+    "background": [
+      0.020292011555946884,
+      0.05161886740262786,
+      0.05504454739154646
+    ],
+    "analysis": [
+      0.0005183792753350394,
+      0.005591972224735886,
+      0.0054103474205276485
+    ]
+  },
+  "training_obs_rmse": {
+    "background": 0.019840561369620664,
+    "analysis": 0.002784127221891781
+  },
+  "held_out_obs_rmse": {
+    "background": 0.02044503155439442,
+    "analysis": 0.0034941419004869585
+  },
+  "diagnostics": {
+    "truth": {
+      "min_depth": 0.9608305088183241,
+      "max_cfl": 0.4126771369975891
+    },
+    "background": {
+      "min_depth": 0.915459544074126,
+      "max_cfl": 0.412060228221456
+    },
+    "analysis": {
+      "min_depth": 0.9591205454650297,
+      "max_cfl": 0.41378474706791496
+    }
+  },
+  "elapsed_seconds": 356.1751117189997,
+  "environment": {
+    "python": "3.12.3",
+    "numpy": "1.26.4",
+    "scipy": "1.13.1",
+    "source_sha256": {
+      "swe2d_4dvar.c": "5f6ded382e6d87d5571fe1965fa6162527eb0fd1bcdc7990c01a48c1709820c6",
+      "swe2d_4dvar.h": "4ef94af257bedbcf81380b1b7a02e31913ea1d08eaee1d130f2ec0561cf0e1c2",
+      "swe.py": "594c884dc6c5333e6da14a73086b7cf529a00369e31854d629ecef175eea7255",
+      "assimilate.py": "2db575224dd7d4605de05592ec0d34cff130a21a3cd64196376432781850da6c",
+      "ad/swe_primal.c": "de5c0d7920ddb0ea1166f200d033bf2e10efc229959d8c120efcf2c76ae99af4",
+      "ad/generated/swe_adjoint_b.c": "0909b6bf7d18b6e43ae3e44825e6a5701d85b2fb848738cb800efa00ec83af7e",
+      "ad/generate.py": "c0a67afa5f9187b8bf37e9f0f3a8b62a5fdc25db2b619dce73f5f94cb2ff2c6b",
+      "ad/runtime/adStack.c": "c282c93852299d5f3b79686c2fdf36bb10ad43261bcbfcf2608570b1c84613b2",
+      "ad/runtime/adBinomial.c": "7a0e24e9982b2f588a17d3ba3ff64811ea9a95f824f3a74bc67d5d3fa60e1ffe"
+    }
+  }
+}

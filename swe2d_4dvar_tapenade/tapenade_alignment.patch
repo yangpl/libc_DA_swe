@@ -1,0 +1,38 @@
+--- upstream/adStack.c
++++ adStack.c
+@@ -1485,7 +1485,7 @@
+     pushNArray((char*)&val, 8) ;
+   }
+   else {
+-    *(double*)(tapblock+tappos) = val;
++    memcpy(tapblock+tappos, &val, sizeof(val));
+     tappos = tappos + 8 ;
+   }
+ #ifdef ADSTACK_PROFILE
+@@ -1499,7 +1499,7 @@
+   }
+   else {
+     tappos = tappos - 8 ;
+-    *val = *(double*)(tapblock+tappos);
++    memcpy(val, tapblock+tappos, sizeof(*val));
+   }
+   if (topRepetitionPoint) checkPopToReadOnly() ;
+ #ifdef ADSTACK_PROFILE
+@@ -1541,7 +1541,7 @@
+     pushNArray((char*)&val, 4) ;
+   }
+   else {
+-    *(int*)(tapblock+tappos) = val;
++    memcpy(tapblock+tappos, &val, sizeof(val));
+     tappos = tappos + 4 ;
+   }
+ #ifdef ADSTACK_PROFILE
+@@ -1555,7 +1555,7 @@
+   }
+   else {
+     tappos = tappos - 4 ;
+-    *val = *(int*)(tapblock+tappos);
++    memcpy(val, tapblock+tappos, sizeof(*val));
+   }
+   if (topRepetitionPoint) checkPopToReadOnly() ;
+ #ifdef ADSTACK_PROFILE

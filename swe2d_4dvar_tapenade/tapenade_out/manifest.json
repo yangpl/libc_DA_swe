@@ -1,0 +1,12 @@
+{
+  "command": "tapenade -reverse -head 'swe_misfit(cost)/(initial)' -I <staged-input> -o swe_adjoint -O <build-output> <staged-input>/swe_primal.c",
+  "generator": "Tapenade 3.16 (develop) - 20 Jun 2026 11:35",
+  "sha256": {
+    "swe_primal.c": "7aa132ece8d4a494a07a0e41789b88f3c93d0d0c3d23f700c630be52ad9cf17f",
+    "swe_primal.h": "a22beb20c9649f67007d94d8b6ed4b43a8b9d3d98f94a6b8a3aae178c1f1b100",
+    "generate_adjoint.py": "f6ac5cd610654176fdfc5a2e27e8bb202b1213b66e9b3e0c2686c83776b17a14",
+    "fix_tapenade_c.py": "855e3347c491b2a5f5e0ac2c3aaba82d88a1d5a8524e942db7634838fd1a84cb",
+    "tapenade_out/swe_adjoint_b.c": "75c398c9aafd188a11faefe9cfc405da1336153291fd5cc73146f49ff36c3467",
+    "tapenade_out/swe_primal_b.h": "534526d39d8668ba94bc2119b90bd6b9b4049c603fd0a0efd56913a9f33aa7e2"
+  }
+}

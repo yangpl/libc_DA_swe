@@ -1,0 +1,7 @@
+__pycache__/
+*.so
+var_output/.mplconfig/
+
+build/
+
+var_output_tapenade/.mplconfig/

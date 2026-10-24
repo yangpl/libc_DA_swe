@@ -1,0 +1,46 @@
+gcc -O1 -g -std=c11 -D_POSIX_C_SOURCE=200809L -fsanitize=address,undefined -fno-omit-frame-pointer -D_POSIX_C_SOURCE=200809L -Iad/runtime -Iad/generated tests/test_tapenade.c swe2d_4dvar.c ad/swe_primal.c ad/generated/swe_adjoint_b.c ad/checkpoint_stats.c ad/runtime/adStack.c ad/runtime/adBinomial.c -lm -pthread -o .build/swe_tapenade_sanitize
+ad/runtime/adStack.c: In function ‘storeInFile’:
+ad/runtime/adStack.c:999:42: warning: embedded ‘\0’ in format [-Wformat-contains-nul]
+  999 |   sprintf(tapStackFileName, "tapStack%05i\0", blockContents->rank) ;
+      |                                          ^~
+ad/runtime/adStack.c: In function ‘restoreFromFile’:
+ad/runtime/adStack.c:1007:42: warning: embedded ‘\0’ in format [-Wformat-contains-nul]
+ 1007 |   sprintf(tapStackFileName, "tapStack%05i\0", blockContents->rank) ;
+      |                                          ^~
+ad/runtime/adStack.c: In function ‘removeStorageFile’:
+ad/runtime/adStack.c:1016:45: warning: embedded ‘\0’ in format [-Wformat-contains-nul]
+ 1016 |   sprintf(tapStackFileNameBis, "tapStack%05i\0", blockRank) ;
+      |                                             ^~
+ad/runtime/adStack.c: In function ‘showErrorContext’:
+ad/runtime/adStack.c:2054:15: warning: format ‘%i’ expects argument of type ‘int’, but argument 2 has type ‘__syscall_slong_t’ {aka ‘long int’} [-Wformat=]
+ 2054 |   printf("t%09i ERROR AT:", ts.tv_nsec) ; showLocation(curStack, tappos) ;
+      |            ~~~^             ~~~~~~~~~~
+      |               |               |
+      |               int             __syscall_slong_t {aka long int}
+      |            %09li
+ad/runtime/adStack.c: In function ‘adStack_showPeakSize’:
+ad/runtime/adStack.c:2065:46: warning: format ‘%llu’ expects argument of type ‘long long unsigned int’, but argument 3 has type ‘long unsigned int’ [-Wformat=]
+ 2065 |   printf("Peak stack size (%1li blocks): %1llu bytes\n",
+      |                                          ~~~~^
+      |                                              |
+      |                                              long long unsigned int
+      |                                          %1lu
+ 2066 |          maxBlocks, maxBlocks*((long int)ADSTACK_BLOCK_SIZE)) ;
+      |                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                              |
+      |                              long unsigned int
+ad/runtime/adStack.c: In function ‘restoreFromFile’:
+ad/runtime/adStack.c:1009:3: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+ 1009 |   fread(blockContents->contents, 1, ADSTACK_BLOCK_SIZE, tapStackFile) ;
+      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 .build/swe_tapenade_sanitize
+nt=1 budget=1 peak=0 forward=1 reverse=1 relative=1.339e-16
+nt=1 budget=8 peak=0 forward=1 reverse=1 relative=1.339e-16
+nt=7 budget=1 peak=1 forward=28 reverse=7 relative=2.162e-16
+nt=7 budget=8 peak=6 forward=13 reverse=7 relative=2.162e-16
+nt=12 budget=1 peak=1 forward=78 reverse=12 relative=3.299e-16
+nt=12 budget=8 peak=8 forward=26 reverse=12 relative=3.299e-16
+nt=33 budget=1 peak=1 forward=561 reverse=33 relative=3.545e-16
+nt=33 budget=8 peak=8 forward=89 reverse=33 relative=3.545e-16
+60x60 multi-block tape and legacy C API passed
+Tapenade/manual worst relative gradient error 3.545e-16; finite differences passed

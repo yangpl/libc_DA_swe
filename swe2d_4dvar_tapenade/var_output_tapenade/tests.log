@@ -1,0 +1,86 @@
+gcc -O3 -std=c11 -Wall -Wextra -Wpedantic -Werror -D_POSIX_C_SOURCE=200809L -Iad/runtime -Iad/generated -fPIC -c swe2d_4dvar.c -o .build/swe2d_4dvar.o
+gcc -O3 -std=c11 -Wall -Wextra -Wpedantic -Werror -D_POSIX_C_SOURCE=200809L -Iad/runtime -Iad/generated -fPIC -c ad/swe_primal.c -o .build/ad/swe_primal.o
+gcc -O3 -std=c11 -Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-variable -D_POSIX_C_SOURCE=200809L -Iad/runtime -Iad/generated -fPIC -c ad/generated/swe_adjoint_b.c -o .build/ad/generated/swe_adjoint_b.o
+ad/generated/swe_adjoint_b.c: In function ‘swe_misfit_b’:
+ad/generated/swe_adjoint_b.c:496:12: warning: suggest explicit braces to avoid ambiguous ‘else’ [-Wdangling-else]
+  496 |         if (action != 4)
+      |            ^
+ad/generated/swe_adjoint_b.c:497:27: warning: ‘adCount’ may be used uninitialized [-Wmaybe-uninitialized]
+  497 |             for (i = 1; i < adCount+1; ++i)
+      |                         ~~^~~~~~~~~~~
+ad/generated/swe_adjoint_b.c:407:9: note: ‘adCount’ was declared here
+  407 |     int adCount;
+      |         ^~~~~~~
+gcc -O3 -std=c11 -Wall -Wextra -Wpedantic -Werror -D_POSIX_C_SOURCE=200809L -Iad/runtime -Iad/generated -fPIC -c ad/checkpoint_stats.c -o .build/ad/checkpoint_stats.o
+gcc -O3 -std=c11 -Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-variable -D_POSIX_C_SOURCE=200809L -Iad/runtime -Iad/generated -fPIC -c ad/runtime/adStack.c -o .build/ad/runtime/adStack.o
+ad/runtime/adStack.c:179: warning: ignoring ‘#pragma omp threadprivate’ [-Wunknown-pragmas]
+  179 | #pragma omp threadprivate(tappos, tapblock, curStack, adbitbuf, adbitibuf, topRepetitionPoint)
+      | 
+ad/runtime/adStack.c: In function ‘storeInFile’:
+ad/runtime/adStack.c:999:42: warning: embedded ‘\0’ in format [-Wformat-contains-nul]
+  999 |   sprintf(tapStackFileName, "tapStack%05i\0", blockContents->rank) ;
+      |                                          ^~
+ad/runtime/adStack.c: In function ‘restoreFromFile’:
+ad/runtime/adStack.c:1007:42: warning: embedded ‘\0’ in format [-Wformat-contains-nul]
+ 1007 |   sprintf(tapStackFileName, "tapStack%05i\0", blockContents->rank) ;
+      |                                          ^~
+ad/runtime/adStack.c: In function ‘removeStorageFile’:
+ad/runtime/adStack.c:1016:45: warning: embedded ‘\0’ in format [-Wformat-contains-nul]
+ 1016 |   sprintf(tapStackFileNameBis, "tapStack%05i\0", blockRank) ;
+      |                                             ^~
+ad/runtime/adStack.c: In function ‘showErrorContext’:
+ad/runtime/adStack.c:2054:15: warning: format ‘%i’ expects argument of type ‘int’, but argument 2 has type ‘__syscall_slong_t’ {aka ‘long int’} [-Wformat=]
+ 2054 |   printf("t%09i ERROR AT:", ts.tv_nsec) ; showLocation(curStack, tappos) ;
+      |            ~~~^             ~~~~~~~~~~
+      |               |               |
+      |               int             __syscall_slong_t {aka long int}
+      |            %09li
+ad/runtime/adStack.c: In function ‘adStack_showPeakSize’:
+ad/runtime/adStack.c:2065:46: warning: format ‘%llu’ expects argument of type ‘long long unsigned int’, but argument 3 has type ‘long unsigned int’ [-Wformat=]
+ 2065 |   printf("Peak stack size (%1li blocks): %1llu bytes\n",
+      |                                          ~~~~^
+      |                                              |
+      |                                              long long unsigned int
+      |                                          %1lu
+ 2066 |          maxBlocks, maxBlocks*((long int)ADSTACK_BLOCK_SIZE)) ;
+      |                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                              |
+      |                              long unsigned int
+ad/runtime/adStack.c: In function ‘restoreFromFile’:
+ad/runtime/adStack.c:1009:3: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+ 1009 |   fread(blockContents->contents, 1, ADSTACK_BLOCK_SIZE, tapStackFile) ;
+      |   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+gcc -O3 -std=c11 -Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-variable -D_POSIX_C_SOURCE=200809L -Iad/runtime -Iad/generated -fPIC -c ad/runtime/adBinomial.c -o .build/ad/runtime/adBinomial.o
+python3 ad/check_generated.py
+Generated adjoint source manifest verified.
+gcc -shared .build/swe2d_4dvar.o .build/ad/swe_primal.o .build/ad/generated/swe_adjoint_b.o .build/ad/checkpoint_stats.o .build/ad/runtime/adStack.o .build/ad/runtime/adBinomial.o -lm -pthread -o libswe.so
+python3 -m unittest discover -s tests -v
+test_budgets_and_concurrent_calls (test_checkpointing.CheckpointingTests.test_budgets_and_concurrent_calls) ... ok
+test_invalid_budgets (test_checkpointing.CheckpointingTests.test_invalid_budgets) ... ok
+test_checkpoint_intervals_equivalent (test_swe.ShallowWaterTests.test_checkpoint_intervals_equivalent) ... ok
+test_control_transform_transpose_and_full_objective (test_swe.ShallowWaterTests.test_control_transform_transpose_and_full_objective) ... ok
+test_multitime_adjoint_all_components_and_boundary (test_swe.ShallowWaterTests.test_multitime_adjoint_all_components_and_boundary) ... ok
+test_reject_invalid_states_and_cfl (test_swe.ShallowWaterTests.test_reject_invalid_states_and_cfl) ... ok
+test_repeated_observations_accumulate (test_swe.ShallowWaterTests.test_repeated_observations_accumulate) ... ok
+test_uniform_rest_and_moving_flow (test_swe.ShallowWaterTests.test_uniform_rest_and_moving_flow) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 0.653s
+
+OK
+gcc -O3 -std=c11 -Wall -Wextra -Wpedantic -Werror tests/test_kernel.c -lm -o .build/swe_kernel_test
+.build/swe_kernel_test
+Euler full-state transpose relative error 7.512e-10; open-boundary conservation passed
+Checkpointed observation-adjoint relative error 3.049e-10
+gcc -O3 -std=c11 -Wall -Wextra -Wpedantic -Werror tests/test_tapenade.c -L. -lswe -Wl,-rpath,'$ORIGIN/..' -lm -pthread -o .build/swe_tapenade_test
+.build/swe_tapenade_test
+nt=1 budget=1 peak=0 forward=1 reverse=1 relative=1.339e-16
+nt=1 budget=8 peak=0 forward=1 reverse=1 relative=1.339e-16
+nt=7 budget=1 peak=1 forward=28 reverse=7 relative=2.162e-16
+nt=7 budget=8 peak=6 forward=13 reverse=7 relative=2.162e-16
+nt=12 budget=1 peak=1 forward=78 reverse=12 relative=3.299e-16
+nt=12 budget=8 peak=8 forward=26 reverse=12 relative=3.299e-16
+nt=33 budget=1 peak=1 forward=561 reverse=33 relative=3.545e-16
+nt=33 budget=8 peak=8 forward=89 reverse=33 relative=3.545e-16
+60x60 multi-block tape and legacy C API passed
+Tapenade/manual worst relative gradient error 3.545e-16; finite differences passed
