@@ -1,0 +1,598 @@
+% Compile: xelatex -interaction=nonstopmode -halt-on-error 4denvar.tex (twice).
+\documentclass[11pt,a4paper]{article}
+\usepackage[fontset=ubuntu]{ctex}
+\usepackage[margin=25mm]{geometry}
+\usepackage{amsmath,amssymb,bm,booktabs,tabularx}
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue]{hyperref}
+\newcommand{\T}{\mathsf T}
+\newcommand{\R}{\mathbb R}
+\newcommand{\Id}{\mathbf I}
+\newcommand{\xx}{\mathbf x}
+\newcommand{\yy}{\mathbf y}
+\newcommand{\dd}{\mathbf d}
+\newcommand{\avec}{\bm\alpha}
+\newcommand{\norm}[2]{\left\|#1\right\|_{#2}}
+\title{4DVar, incremental 4DVar, 4DEnVar and Analytic-4DEnVar}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文给出强约束、初始场控制下的四维集合变分同化（4DEnVar）及其解析求解形式
+（A-4DEnVar）：用非线性浅水模型产生集合轨迹，用同一组集合系数拟合整个时间窗的观测，
+再以集合空间或观测空间的线性方程求取初始场增量。
+同时给出仅观测水位时的分量公式、非线性外循环和实现步骤。
+解析解针对固定集合给出的二次近似问题；对一般非线性浅水方程，不能把它解释为原始
+4D-Var 非线性优化问题的一次性精确解。
+\end{abstract}
+
+
+本文假设模式无误差，仅优化初始状态；水深地形 $h(x,y)$、重力加速度 $g$、
+科氏参数 $f$ 和阻尼系数 $\gamma$ 均已知。
+观测误差与背景误差相互独立，观测误差协方差正定。
+默认不作局地化；局地化对这些公式的影响在后文说明。
+
+\section{二维 SWE 与四维观测映射}
+
+\subsection{前向模型与离散状态}
+
+在区域 $\Omega\subset\R^2$ 上，浅水方程为
+\begin{align}
+ \partial_t u+u\partial_xu+v\partial_yu+g\partial_xz-fv+\gamma u&=0,\\
+ \partial_t v+u\partial_xv+v\partial_yv+g\partial_yz+fu+\gamma v&=0,\\
+ \partial_t z+\partial_x(Hu)+\partial_y(Hv)&=0,
+ \qquad H=h+z.
+ \label{eq:swe}
+\end{align}
+这里 $z$ 是自由表面位移，$H$ 是总水深。
+所有成员使用相同的边界条件、地形、离散格式和时间步长；初值须满足边界条件和 $H>0$。
+将交错网格上的独立自由度排列成
+\begin{equation}
+ \xx^n=\begin{pmatrix}\mathbf u^n\\\mathbf v^n\\\mathbf z^n\end{pmatrix}
+ \in\R^{n_x},\qquad n_x=n_u+n_v+n_z.
+\end{equation}
+周期网格上通常 $n_u=n_v=n_z=N_xN_y$；其他边界下应按实际自由度计数，
+不把由边界条件决定的虚点当作独立控制量。
+采用 \texttt{swe.tex} 对应的前向离散，记
+\begin{equation}
+ \xx^{n+1}=\mathcal S_n(\xx^n),\qquad
+ \xx_k=\mathcal M_{k,0}(\xx_0),
+ \label{eq:forward}
+\end{equation}
+其中 $k$ 标记观测时刻 $t_k$，$\mathcal M_{k,0}$ 是从 $t_0$ 到 $t_k$ 的完整非线性数值积分，
+包含所有边界更新、插值和必要的稳定化操作。以下方法只需调用这个前向程序。
+
+\subsection{观测与传统 4D-Var}
+
+令 $k=1,\ldots,K$，观测满足
+\begin{equation}
+ \yy_k=\mathcal H_k(\xx_k)+\bm\epsilon_k,
+ \qquad \mathbb E\bm\epsilon_k=0,\qquad
+ \mathbb E[\bm\epsilon_k\bm\epsilon_\ell^\T]
+ =\delta_{k\ell}\mathbf R_k,
+ \label{eq:obs}
+\end{equation}
+其中 $\yy_k\in\R^{m_k}$。
+水位站观测可写成
+\begin{equation}
+ \mathcal H_k(\xx_k)=\mathbf H_k\xx_k,
+ \qquad \mathbf H_k=\begin{pmatrix}0&0&\mathbf P_{z,k}\end{pmatrix},
+ \label{eq:heightobs}
+\end{equation}
+$\mathbf P_{z,k}$ 从水位网格插值到站点；若还有流速观测，则增加对应的
+$u$、$v$ 插值行。这里的 $\mathbf H_k$ 是观测矩阵，不是总水深 $H$。
+
+定义四维观测映射及堆叠数据
+\begin{equation}
+ \mathcal G(\xx_0)=
+ \begin{pmatrix}\mathcal H_1(\mathcal M_{1,0}(\xx_0))\\\vdots\\
+ \mathcal H_K(\mathcal M_{K,0}(\xx_0))\end{pmatrix},
+ \quad \yy=\begin{pmatrix}\yy_1\\\vdots\\\yy_K\end{pmatrix},
+ \quad \mathbf R=\operatorname{diag}(\mathbf R_1,\ldots,\mathbf R_K).
+ \label{eq:stack}
+\end{equation}
+总观测数为 $m=\sum_k m_k$。若误差跨时刻相关，只需将 $\mathbf R$ 换成完整正定协方差。
+记 $\norm{\mathbf q}{\mathbf A}^2=\mathbf q^\T\mathbf A\mathbf q$。
+传统强约束 4D-Var 的目标是
+\begin{equation}
+ J(\xx_0)=\frac12\norm{\xx_0-\xx_0^b}{\mathbf B^{-1}}^2
+ +\frac12\norm{\mathcal G(\xx_0)-\yy}{\mathbf R^{-1}}^2.
+ \label{eq:4dvar}
+\end{equation}
+这里 $\mathbf B$ 是初始背景误差协方差。若 $\mathbf G=D\mathcal G(\xx_0)$，则
+\begin{equation}
+ \nabla J=\mathbf B^{-1}(\xx_0-\xx_0^b)
+ +\mathbf G^\T\mathbf R^{-1}\bigl(\mathcal G(\xx_0)-\yy\bigr).
+\end{equation}
+常规大规模实现通过切线性和伴随模型计算相关乘积；集合方法则用前向样本构造其低秩近似。
+
+\subsection{经典 4D-Var 与增量 4D-Var}
+
+式~\eqref{eq:4dvar} 是经典（非增量）强约束 4D-Var 的目标：它直接以初始场
+$\xx_0$ 为控制变量，在整个窗口上极小化完全非线性的代价函数；
+代价评估使用完整非线性模式 $\mathcal M_{k,0}$ 与观测算子 $\mathcal H_k$，
+梯度通过围绕当前轨迹的切线性—伴随模型计算。
+经典 4D-Var 对整个非线性问题作单次极小化。
+
+增量 4D-Var 把这一极小化改写为外循环与内循环的交替。
+设第 $n$ 次外循环的初始场估计为 $\xx^{\langle n\rangle}$，定义增量
+$\delta\xx=\xx_0-\xx^{\langle n\rangle}$，其非线性轨迹与观测偏离为
+\begin{equation}
+ \xx_k^{\langle n\rangle}=\mathcal M_{k,0}(\xx^{\langle n\rangle}),
+ \qquad
+ \dd_k^{\langle n\rangle}=\yy_k-\mathcal H_k(\xx_k^{\langle n\rangle}).
+\end{equation}
+围绕该轨迹线性化模式与观测算子：
+\begin{align}
+ \mathcal M_{k,0}(\xx^{\langle n\rangle}+\delta\xx)
+ &\simeq\xx_k^{\langle n\rangle}+\mathbf M_{k,0}\,\delta\xx,\\
+ \mathcal H_k(\xx_k^{\langle n\rangle}+\mathbf M_{k,0}\delta\xx)
+ &\simeq\mathcal H_k(\xx_k^{\langle n\rangle})
+ +\mathbf H_k\mathbf M_{k,0}\,\delta\xx,
+\end{align}
+其中 $\mathbf M_{k,0}$ 为切线性模式，$\mathbf H_k$ 为线性化观测算子。
+内循环在增量上极小化二次代价
+\begin{equation}
+ J^{\langle n\rangle}(\delta\xx)
+ =\frac12\norm{\xx^{\langle n\rangle}+\delta\xx-\xx_0^b}{\mathbf B^{-1}}^2
+ +\frac12\sum_{k=1}^K
+ \norm{\mathbf H_k\mathbf M_{k,0}\delta\xx-\dd_k^{\langle n\rangle}}
+ {\mathbf R_k^{-1}}^2,
+ \label{eq:incrJ}
+\end{equation}
+其梯度为
+\begin{equation}
+ \nabla_{\delta\xx}J^{\langle n\rangle}
+ =\mathbf B^{-1}(\xx^{\langle n\rangle}+\delta\xx-\xx_0^b)
+ +\sum_k\mathbf M_{k,0}^\T\mathbf H_k^\T\mathbf R_k^{-1}
+ (\mathbf H_k\mathbf M_{k,0}\delta\xx-\dd_k^{\langle n\rangle}).
+\end{equation}
+内循环极小化常用共轭梯度等迭代法求解，随后作外循环更新
+$\xx^{\langle n+1\rangle}
+=\xx^{\langle n\rangle}+\delta\xx^{\langle n\rangle}$，
+并重复至收敛。业务实现中，内循环通常采用分辨率更低或简化的
+切线性—伴随模式，而外循环用完整非线性模式重新计算轨迹与偏离。
+
+两者的数学差异概括如下：
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{@{}p{0.18\textwidth}
+ >{\raggedright\arraybackslash}X
+ >{\raggedright\arraybackslash}X@{}}
+\toprule
+ & 经典 4D-Var & 增量 4D-Var\\
+\midrule
+控制变量 & $\xx_0$ & $\delta\xx$\\
+代价函数 & 完全非线性 $J(\xx_0)$ & 二次近似 $J^{\langle n\rangle}(\delta\xx)$\\
+极小化中的模式 & 完整非线性模式 & 切线性/伴随，常用简化模式\\
+结构 & 单次极小化 & 外循环 + 内循环\\
+非线性处理 & 直接体现在代价与外层迭代中 & 内循环线性化，外循环重新线性化\\
+计算成本 & 高 & 较低\\
+\bottomrule
+\end{tabularx}
+\end{center}
+即经典 4D-Var 求解 $\min_{\xx_0}J(\xx_0)$，而增量 4D-Var 迭代
+$\xx^{\langle n+1\rangle}
+=\xx^{\langle n\rangle}
++\arg\min_{\delta\xx}J^{\langle n\rangle}(\delta\xx)$。
+增量法是经典 4D-Var 的近似；随外循环反复重新线性化，
+其解可逼近完整 4D-Var 分析，而计算成本显著降低。
+
+本文与该框架的对应是：式~\eqref{eq:Je} 在集合初值子空间内给出与
+内循环~\eqref{eq:incrJ} 同型的二次目标，只是把切线性乘积
+$\mathbf H_k\mathbf M_{k,0}\delta\xx$ 换成集合回归
+$\mathbf Y_k\avec$，并把增量限制在集合张成空间内；
+第 5 节的外循环~\eqref{eq:outer} 则在集合系数空间 $\avec$ 中
+重复"围绕当前轨迹重新线性化、解二次子问题、更新估计"的增量结构。
+
+\section{集合轨迹与统一的归一化约定}
+
+取 $N_e\geq2$ 个初始集合成员，令其样本均值等于背景初值：
+\begin{equation}
+ \xx_0^b=\frac1{N_e}\sum_{e=1}^{N_e}\xx_0^{(e)},\qquad
+ \mathbf X_0=\frac1{\sqrt{N_e-1}}
+ \begin{pmatrix}\xx_0^{(1)}-\xx_0^b&\cdots&\xx_0^{(N_e)}-\xx_0^b\end{pmatrix}.
+ \label{eq:X0}
+\end{equation}
+于是样本背景协方差为
+\begin{equation}
+ \mathbf B_e=\mathbf X_0\mathbf X_0^\T,\qquad
+ \mathbf X_0\mathbf 1=0,\qquad \operatorname{rank}(\mathbf B_e)\leq N_e-1.
+\end{equation}
+这里已把 $1/\sqrt{N_e-1}$ 吸收进扰动矩阵；后面的背景项是
+$\tfrac12\avec^\T\avec$，不能再额外乘一次 $N_e-1$。
+
+对背景和每个成员作非线性前向积分：
+\begin{align}
+ \xx_k^b&=\mathcal M_{k,0}(\xx_0^b),&
+ \xx_k^{(e)}&=\mathcal M_{k,0}(\xx_0^{(e)}),\\
+ \overline{\xx}_k&=\frac1{N_e}\sum_e\xx_k^{(e)},&
+ \mathbf X_k&=\frac1{\sqrt{N_e-1}}
+ \begin{pmatrix}\xx_k^{(1)}-\overline{\xx}_k&\cdots&
+ \xx_k^{(N_e)}-\overline{\xx}_k\end{pmatrix}.
+\end{align}
+在观测空间构造
+\begin{align}
+ \mathbf y_k^b&=\mathcal H_k(\xx_k^b),&
+ \mathbf y_k^{(e)}&=\mathcal H_k(\xx_k^{(e)}),&
+ \overline{\mathbf y}_k&=\frac1{N_e}\sum_e\mathbf y_k^{(e)},\\
+ \mathbf Y_k&=\frac1{\sqrt{N_e-1}}
+ \begin{pmatrix}\mathbf y_k^{(1)}-\overline{\mathbf y}_k&\cdots&
+ \mathbf y_k^{(N_e)}-\overline{\mathbf y}_k\end{pmatrix},&&&
+ \dd_k&=\yy_k-\mathbf y_k^b.
+ \label{eq:Yk}
+\end{align}
+定义 $\mathbf Y=(\mathbf Y_1^\T,\ldots,\mathbf Y_K^\T)^\T\in\R^{m\times N_e}$，
+$\dd=(\dd_1^\T,\ldots,\dd_K^\T)^\T$。
+线性观测时 $\mathbf Y_k=\mathbf H_k\mathbf X_k$；非线性观测时，直接对每个成员施加
+$\mathcal H_k$ 后再中心化，不必写出观测算子的导数。
+
+\paragraph{背景轨迹与集合均值并不相同。}
+一般有 $\overline{\xx}_k\ne\xx_k^b$，以及
+$\overline{\mathbf y}_k\ne\mathbf y_k^b$。
+本文用背景的非线性轨迹定义新息，用中心化集合估计协方差；因此下述仿射关系是近似，
+不是对有限幅度非线性集合的精确插值。
+若改用 $\yy_k-\overline{\mathbf y}_k$，则得到以预测观测集合均值为中心的另一种集合回归更新，
+不能在推导中无说明地混用这两个中心。
+
+\section{4DEnVar：集合空间中的四维变分问题}
+
+\subsection{控制变量与代价函数}
+
+用 $N_e$ 维无量纲系数 $\avec$ 表示初始场增量：
+\begin{equation}
+ \xx_0(\avec)=\xx_0^b+\mathbf X_0\avec,
+ \qquad
+ \begin{pmatrix}\delta\mathbf u_0\\\delta\mathbf v_0\\\delta\mathbf z_0\end{pmatrix}
+ =\begin{pmatrix}\mathbf X_{u,0}\\\mathbf X_{v,0}\\\mathbf X_{z,0}\end{pmatrix}\avec.
+ \label{eq:control}
+\end{equation}
+集合轨迹提供近似
+\begin{equation}
+ \mathcal M_{k,0}(\xx_0^b+\mathbf X_0\avec)
+ \simeq\xx_k^b+\mathbf X_k\avec,\qquad
+ \mathcal G(\xx_0^b+\mathbf X_0\avec)
+ \simeq\mathcal G(\xx_0^b)+\mathbf Y\avec.
+ \label{eq:surrogate}
+\end{equation}
+\textbf{所有时刻共用同一组 $\avec$}：观测在整个窗口内共同约束一个初始场。
+若每个时刻独立选择系数，就不再是这里的强约束初值同化问题。
+
+取系数先验 $\avec\sim\mathcal N(0,\Id)$，得到固定集合下的二次目标
+\begin{equation}
+ \boxed{J_e(\avec)=\frac12\avec^\T\avec
+ +\frac12\sum_{k=1}^K\norm{\mathbf Y_k\avec-\dd_k}{\mathbf R_k^{-1}}^2
+ =\frac12\avec^\T\avec+\frac12\norm{\mathbf Y\avec-\dd}{\mathbf R^{-1}}^2.}
+ \label{eq:Je}
+\end{equation}
+其状态先验协方差为 $\mathbf B_e$，通常是奇异的，故不显式计算 $\mathbf B_e^{-1}$。
+在 $\operatorname{range}(\mathbf X_0)$ 内，给定增量的最小系数范数等价于用
+$\mathbf B_e$ 的 Moore--Penrose 广义逆定义背景代价；集合张成空间之外的增量被排除。
+
+\subsection{梯度、Hessian 与迭代实现}
+
+由式~\eqref{eq:Je} 直接得到
+\begin{align}
+ \nabla_{\avec}J_e
+ &=\avec+\sum_k\mathbf Y_k^\T\mathbf R_k^{-1}(\mathbf Y_k\avec-\dd_k),
+ \label{eq:grad}\\
+ \nabla_{\avec}^2J_e
+ &=\mathbf A=\Id+\sum_k\mathbf Y_k^\T\mathbf R_k^{-1}\mathbf Y_k,\qquad
+ \mathbf b=\sum_k\mathbf Y_k^\T\mathbf R_k^{-1}\dd_k.
+ \label{eq:A}
+\end{align}
+对任意非零 $\mathbf p$，
+\begin{equation}
+ \mathbf p^\T\mathbf A\mathbf p
+ =\|\mathbf p\|_2^2+\norm{\mathbf Y\mathbf p}{\mathbf R^{-1}}^2>0.
+\end{equation}
+因此极小点唯一。集合中心化导致的列相关不会使 $\mathbf A$ 奇异。
+标准实现可用共轭梯度等方法求解 $\mathbf A\avec=\mathbf b$，其矩阵乘积为
+\begin{equation}
+ \mathbf A\mathbf p=\mathbf p+
+ \sum_k\mathbf Y_k^\T\mathbf R_k^{-1}(\mathbf Y_k\mathbf p).
+\end{equation}
+固定集合后，内层迭代只涉及集合和观测空间的运算，不再调用 SWE 前向或伴随模型。
+
+\section{A-4DEnVar：解析解与时空交叉协方差}
+
+\subsection{集合空间形式}
+
+令式~\eqref{eq:grad} 为零，有
+\begin{equation}
+ \boxed{\avec^a=(\Id+\mathbf Y^\T\mathbf R^{-1}\mathbf Y)^{-1}
+ \mathbf Y^\T\mathbf R^{-1}\dd,\qquad
+ \xx_0^a=\xx_0^b+\mathbf X_0\avec^a.}
+ \label{eq:analytical}
+\end{equation}
+这里的逆号表示数学解；实际用 Cholesky 分解解线性方程，不形成显式逆矩阵。
+解析求解消除了二次内层的优化迭代，并未消除集合积分、矩阵组装和线性代数计算。
+
+\subsection{观测空间形式及推导}
+
+定义
+\begin{equation}
+ \mathbf C_{0y}=\mathbf X_0\mathbf Y^\T\in\R^{n_x\times m},\qquad
+ \mathbf C_{yy}=\mathbf Y\mathbf Y^\T\in\R^{m\times m}.
+ \label{eq:covs}
+\end{equation}
+利用恒等式
+\begin{equation}
+ (\Id+\mathbf Y^\T\mathbf R^{-1}\mathbf Y)^{-1}\mathbf Y^\T\mathbf R^{-1}
+ =\mathbf Y^\T(\mathbf R+\mathbf Y\mathbf Y^\T)^{-1},
+\end{equation}
+得到同一极小点的协方差表达
+\begin{equation}
+ \boxed{\xx_0^a=\xx_0^b+
+ \mathbf C_{0y}(\mathbf C_{yy}+\mathbf R)^{-1}
+ \bigl[\yy-\mathcal G(\xx_0^b)\bigr].}
+ \label{eq:gain}
+\end{equation}
+上述恒等式可由
+$\mathbf A\mathbf Y^\T=\mathbf Y^\T\mathbf R^{-1}(\mathbf R+\mathbf Y\mathbf Y^\T)$
+直接验证。
+$\mathbf C_{yy}$ 描述预测观测的不确定性，$\mathbf R$ 描述测量误差，不能将两者混同。
+
+按观测时刻展开，有
+\begin{equation}
+ \mathbf C_{0y}=\begin{pmatrix}\mathbf X_0\mathbf Y_1^\T&\cdots&
+ \mathbf X_0\mathbf Y_K^\T\end{pmatrix},\qquad
+ [\mathbf C_{yy}]_{k\ell}=\mathbf Y_k\mathbf Y_\ell^\T.
+ \label{eq:blocks}
+\end{equation}
+即使观测误差在不同时刻独立，预测观测之间的跨时刻协方差通常也不为零。
+因此不能把式~\eqref{eq:gain} 随意改成各时刻独立增益的求和。
+
+\subsection{与伴随传播的关系}
+
+记背景处的切线性传播矩阵为
+$\mathbf M_{k,0}=D\mathcal M_{k,0}(\xx_0^b)$，观测 Jacobian 为
+$\mathbf H_k=D\mathcal H_k(\xx_k^b)$。
+在扰动足够小且映射可微时，
+\begin{align}
+ \mathbf X_k&\simeq\mathbf M_{k,0}\mathbf X_0,&
+ \mathbf Y_k&\simeq\mathbf H_k\mathbf M_{k,0}\mathbf X_0,\\
+ \mathbf X_0\mathbf Y_k^\T
+ &\simeq\mathbf B_e\mathbf M_{k,0}^\T\mathbf H_k^\T,&
+ \mathbf Y_k\mathbf Y_\ell^\T
+ &\simeq\mathbf H_k\mathbf M_{k,0}\mathbf B_e
+ \mathbf M_{\ell,0}^\T\mathbf H_\ell^\T.
+ \label{eq:adjointlink}
+\end{align}
+所以初值与未来观测的交叉协方差，近似承担了
+$\mathbf B_e\mathbf M_{k,0}^\T\mathbf H_k^\T$ 将观测信息传回初始场的作用。
+这并不构造任意输入上的完整伴随算子，而只表示集合空间内的统计作用。
+
+在线性模式、线性观测且背景协方差恰为 $\mathbf B_e$ 的条件下，
+式~\eqref{eq:gain} 是相应受限 4D-Var 的精确解。
+若目标使用一般满秩 $\mathbf B$，小集合通常不满足 $\mathbf B_e=\mathbf B$，
+即使模式线性，两者也不必相等。
+
+\subsection{仅有水位观测时的 SWE 分量公式}
+
+将所有站点和时刻统一编号为 $a=1,\ldots,m$；第 $a$ 条观测位于
+$(\mathbf r_a,t_a)$，其模式预测水位为 $\zeta_a^{(e)}$
+（含与实际观测一致的插值）。对于 $s\in\{u,v,z\}$，定义
+\begin{align}
+ C_{s_0\zeta}(\mathbf r;a)
+ &=\frac1{N_e-1}\sum_e
+ [s_0^{(e)}(\mathbf r)-s_0^b(\mathbf r)]
+ [\zeta_a^{(e)}-\overline\zeta_a],\\
+ C_{\zeta\zeta}(a,b)
+ &=\frac1{N_e-1}\sum_e
+ [\zeta_a^{(e)}-\overline\zeta_a]
+ [\zeta_b^{(e)}-\overline\zeta_b].
+\end{align}
+先求解
+\begin{equation}
+ (\mathbf C_{\zeta\zeta}+\mathbf R)\bm\beta=\dd,
+ \qquad d_a=y_a-\zeta_a^b,
+ \label{eq:beta}
+\end{equation}
+再更新
+\begin{equation}
+ \boxed{
+ \begin{aligned}
+ u_0^a(\mathbf r)&=u_0^b(\mathbf r)+\sum_a C_{u_0\zeta}(\mathbf r;a)\beta_a,\\
+ v_0^a(\mathbf r)&=v_0^b(\mathbf r)+\sum_a C_{v_0\zeta}(\mathbf r;a)\beta_a,\\
+ z_0^a(\mathbf r)&=z_0^b(\mathbf r)+\sum_a C_{z_0\zeta}(\mathbf r;a)\beta_a.
+ \end{aligned}}
+ \label{eq:component}
+\end{equation}
+这说明水位观测也能修正初始流速：连续方程中的通量和动量方程中的压力梯度，
+使初始流速与未来水位相关；这种联系由非线性集合积分估计。
+若初始集合仅扰动 $z_0$，则 $\mathbf X_{u,0}=\mathbf X_{v,0}=0$，
+本方法不能产生初始流速增量，尽管重新积分后未来流速仍会改变。
+
+\subsection{窗口内状态与分析不确定性}
+
+集合近似给出的平滑状态为
+\begin{equation}
+ \widetilde{\xx}_k^a=\xx_k^b+\mathbf X_k\avec^a
+ =\xx_k^b+\mathbf X_k\mathbf Y^\T(\mathbf C_{yy}+\mathbf R)^{-1}\dd.
+\end{equation}
+但非线性情形下，它通常不等于
+\begin{equation}
+ \boxed{\xx_k^a=\mathcal M_{k,0}(\xx_0^a).}
+ \label{eq:rerun}
+\end{equation}
+若要求分析轨迹严格满足离散 SWE，应采用式~\eqref{eq:rerun} 重新积分，
+并据此评估真实观测残差。
+在当前线性高斯集合近似内，初始分析协方差为
+\begin{equation}
+ \mathbf P_0^a=\mathbf X_0\mathbf A^{-1}\mathbf X_0^\T
+ =\mathbf B_e-\mathbf C_{0y}(\mathbf C_{yy}+\mathbf R)^{-1}\mathbf C_{0y}^\T.
+\end{equation}
+此式描述近似问题的不确定性，不是一般非线性 SWE 后验分布的精确协方差。
+
+\section{非线性外循环：解析内层不等于非线性精确解}
+
+\subsection{固定先验与原始非线性集合目标}
+
+在固定初始基底 $\mathbf X_0$ 内，真正的非线性受限目标是
+\begin{equation}
+ \Phi(\avec)=\frac12\avec^\T\avec+
+ \frac12\norm{\mathcal G(\xx_0^b+\mathbf X_0\avec)-\yy}{\mathbf R^{-1}}^2.
+ \label{eq:nonlinear}
+\end{equation}
+一次 A-4DEnVar 更新仅将其中的观测映射替换为式~\eqref{eq:surrogate} 后求解。
+为改善非线性拟合，可保留原始背景、先验和集合空间，进行以下外循环。
+
+第 $q$ 次外循环令
+\begin{equation}
+ \xx_0^q=\xx_0^b+\mathbf X_0\avec^q,\qquad
+ \dd^q=\yy-\mathcal G(\xx_0^q),\qquad
+ \mathbf D^q=\left.\frac{\partial\mathcal G(\xx_0^b+\mathbf X_0\avec)}{\partial\avec}
+ \right|_{\avec=\avec^q}.
+\end{equation}
+在更新 $\mathbf p$ 上作 Gauss--Newton 二次近似：
+\begin{equation}
+ Q_q(\mathbf p)=\frac12\|\avec^q+\mathbf p\|_2^2
+ +\frac12\norm{\mathbf D^q\mathbf p-\dd^q}{\mathbf R^{-1}}^2.
+\end{equation}
+相应解析内层为
+\begin{equation}
+ \boxed{[\Id+(\mathbf D^q)^\T\mathbf R^{-1}\mathbf D^q]\mathbf p
+ =(\mathbf D^q)^\T\mathbf R^{-1}\dd^q-\avec^q,\qquad
+ \avec^{q+1}=\avec^q+\eta_q\mathbf p,}
+ \label{eq:outer}
+\end{equation}
+其中 $0<\eta_q\leq1$ 由对真实目标 $\Phi$ 的线搜索选取，并检查水深正性等可行性。
+也可在左端添加 $\lambda_q\Id$（$\lambda_q\geq0$）作阻尼。
+\textbf{右端的 $-\avec^q$ 不能省略}：每次都围绕原始背景计量先验代价，
+而不是把上一轮分析重新当作独立背景、重复同化同一批观测。
+
+\subsection{仅用前向 SWE 估计方向导数}
+
+为完全避免切线性和伴随程序，可令 $\mathbf s_e=\mathbf X_0\mathbf e_e$，
+其中 $\mathbf e_e$ 是第 $e$ 个坐标向量，通过有限差分估计
+\begin{equation}
+ \widehat{\mathbf D}^{\,q}_{:,e}
+ =\frac{\mathcal G(\xx_0^q+\varepsilon\mathbf s_e)
+              -\mathcal G(\xx_0^q)}{\varepsilon},
+ \qquad e=1,\ldots,N_e.
+ \label{eq:fd}
+\end{equation}
+这里 $\varepsilon$ 是无量纲差分步长，$\mathbf s_e$ 已包含集合归一化因子，
+不能在式~\eqref{eq:fd} 外再除以 $\sqrt{N_e-1}$。
+在光滑情形下，其截断误差为 $O(\varepsilon)$；过小步长会放大舍入误差。
+可用中心差分提高精度，但需要两倍的扰动积分。
+每轮需重新计算当前轨迹和扰动轨迹，将 $\widehat{\mathbf D}^{\,q}$ 代入
+式~\eqref{eq:outer} 后求解。这是一种明确可实现的无伴随、集合子空间
+Gauss--Newton 外循环，并不声称是所有名为 A-4DEnVar 的文献采用的唯一外循环。
+
+\subsection{与 Newton 法等价的条件}
+
+令 $r_a(\avec)=\mathcal G_a(\xx_0^b+\mathbf X_0\avec)-y_a$。
+式~\eqref{eq:nonlinear} 的精确 Hessian 为
+\begin{equation}
+ \nabla^2\Phi
+ =\Id+\mathbf D^\T\mathbf R^{-1}\mathbf D
+ +\sum_{a=1}^m(\mathbf R^{-1}\mathbf r)_a\nabla^2_{\avec}\mathcal G_a.
+ \label{eq:newton}
+\end{equation}
+式~\eqref{eq:outer} 忽略最后一项，因此是 Gauss--Newton 步，而非一般意义下的精确 Newton 步。
+只有映射仿射、残差相关二阶项为零等情况下两者才一致。
+标准集合的有限幅度异常 $\mathbf Y$ 还只是方向导数的统计近似。
+因此，源说明中的“等价于 Newton”或“完全继承非线性能力”，须加上
+线性化、集合子空间和协方差表示等条件。
+非线性成员积分能够提供随流场变化的协方差，但并不保证一次解析更新达到非线性最优解；
+外循环也通常只寻求局部极小点。
+
+\section{面向现有二维 SWE 程序的实施步骤}
+
+\subsection{一次同化窗口}
+
+\begin{enumerate}
+ \item 准备 $\xx_0^b$、$N_e$ 个中心化初始扰动、观测 $\yy_k$ 和误差协方差
+ $\mathbf R_k$。根据需要同时扰动 $u_0,v_0,z_0$，保证初值边界与水深约束。
+ \item 用相同前向程序积分背景及全部成员。在观测时刻提取预测观测，
+ 由式~\eqref{eq:X0}、\eqref{eq:Yk} 构造 $\mathbf X_0,\mathbf Y_k,\dd_k$。
+ \item 若误差在时间上独立，初始化 $\mathbf A=\Id$、$\mathbf b=0$，逐时刻累加
+ \[
+  \mathbf A\leftarrow\mathbf A+\mathbf Y_k^\T\mathbf R_k^{-1}\mathbf Y_k,
+  \qquad \mathbf b\leftarrow\mathbf b+\mathbf Y_k^\T\mathbf R_k^{-1}\dd_k.
+ \]
+ 对非对角 $\mathbf R_k$，通过线性求解实施 $\mathbf R_k^{-1}$ 的作用。
+ \item 标准 4DEnVar 用迭代线性求解器，A-4DEnVar 用直接分解，求同一个系统
+ $\mathbf A\avec^a=\mathbf b$。验证残差
+ $\|\mathbf A\avec^a-\mathbf b\|_2$ 达到所需精度。
+ \item 计算 $\xx_0^a=\xx_0^b+\mathbf X_0\avec^a$，重新积分 SWE，比较背景和分析的
+ 真实观测残差及目标~\eqref{eq:nonlinear}。若近似失效，使用上述非线性外循环。
+\end{enumerate}
+
+\subsection{规模、存储与物理约束}
+
+若 $\mathbf R$ 为对角矩阵且 $N_e\ll m$，集合空间组装约需
+$O(mN_e^2)$ 运算，Cholesky 分解约需 $O(N_e^3)$ 运算；
+对一般稠密相关 $\mathbf R$，还要计入其分解和求解成本。
+观测空间形式需处理 $m\times m$ 系统，主要适合 $m$ 很小的情形。
+成员前向积分通常占主要成本，可以独立计算。
+只求初值时，核心存储为 $\mathbf X_0$ 和观测异常 $\mathbf Y$，
+不必存储全部网格、全部时间步的轨迹；如需集合平滑状态，再保存相应的 $\mathbf X_k$。
+
+集合应反映空间相关尺度以及 $u,v,z$ 的交叉相关，避免把任意高频白噪声当作合理先验。
+由于速度和水位量纲不同，需通过各自扰动幅度或无量纲化定义先验，不能无依据地使用相同数值方差。
+若只优化水位初值，令 $\mathbf X_{u,0}=\mathbf X_{v,0}=0$ 即可得到相应受限问题。
+若需保持初始总水量，要求每列水位扰动满足
+\begin{equation}
+ \sum_{i,j}\delta z_{0,i,j}^{(e)}\Delta x\Delta y=0;
+\end{equation}
+则任意集合线性组合仍满足这个线性约束。
+相反，即使每个成员均有正水深，任意系数线性组合也未必保持 $h+z_0^a>0$，
+必须检查并在必要时使用受约束求解或缩短步长；此时无约束解析公式不再是受约束问题的精确解。
+整个窗口内仍须满足前向数值格式的稳定性与可行性条件。
+
+\subsection{小集合误差与局地化}
+
+小集合会带来秩限制和虚假远距离相关。协方差膨胀可通过放大初始扰动并重新积分实现。
+空间局地化可采用正半定相关核对联合协方差作 Schur 乘积，或使用局部观测域/扩展集合基底。
+若直接修改 $\mathbf C_{0y}$ 或 $\mathbf C_{yy}$，必须保持所采用联合协方差的一致性及正半定性；
+其结果通常不再等价于原始单一全局系数下的式~\eqref{eq:Je}。
+局部空间变化的系数也不能未经说明地替代全局 $\avec$，否则可能破坏轨迹关系和物理平衡。
+跨时刻相关应结合浅水波传播距离及流场平流解释，不能仅因时刻不同就全部删去。
+
+\section{四种方法在本问题中的比较}
+
+这里将经典 4D-Var 指定为直接迭代最小化非线性目标~\eqref{eq:4dvar} 的实现；
+增量 4D-Var 则围绕参考轨迹建立关于初值增量的二次内层问题，
+通过外循环更新参考轨迹。两者针对同一个原始目标，主要区别是优化组织方式。
+下表中的 4DEnVar 与 A-4DEnVar 均采用本文固定集合、无局地化的定义。
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{@{}>{\raggedright\arraybackslash}p{0.12\textwidth}
+ >{\raggedright\arraybackslash}X
+ >{\raggedright\arraybackslash}X
+ >{\raggedright\arraybackslash}X
+ >{\raggedright\arraybackslash}X@{}}
+\toprule
+ & 经典 4D-Var & 增量 4D-Var & 4DEnVar & A-4DEnVar\\
+\midrule
+优化目标 & 直接最小化非线性 $J(\xx_0)$ & 内层最小化 $J$ 的局部二次近似 & 固定集合二次目标 $J_e(\avec)$ & 同一二次目标 $J_e(\avec)$\\
+\addlinespace
+控制变量 & 初始场 $\xx_0$，可作背景预条件 & 参考初值的增量 $\delta\xx_0$，可作背景预条件 & 集合系数 $\avec$；增量 $\mathbf X_0\avec$ & 同一集合系数或等价协方差更新\\
+\addlinespace
+灵敏度来源 & 当前非线性轨迹上的伴随梯度 & 参考轨迹上的切线性与伴随传播 & 非线性集合轨迹的观测异常 $\mathbf Y$ & 同一 $\mathbf Y$ 及其时空交叉协方差\\
+\addlinespace
+模型调用 & 每次梯度评估通常需前向与伴随积分 & 外层作非线性积分；内层作切线性与伴随积分 & 建集合时作前向积分；固定集合内层无需模式积分 & 建集合时作前向积分；解析内层无需模式积分\\
+\addlinespace
+求解方式 & 非线性迭代，如 L-BFGS 与线搜索 & 内层通常用共轭梯度，外层更新参考轨迹 & 可迭代求解 $\mathbf A\avec=\mathbf b$，也可直接求解 & 用解析公式表示，并直接求解等价线性系统\\
+\addlinespace
+非线性处理 & 迭代中重新计算非线性目标与梯度 & 外循环重新积分并线性化 & 必要时重建集合近似并作外循环 & 同样需要外循环；一次解析更新不保证非线性最优\\
+\addlinespace
+主要限制 & 非凸性、局部极小点及伴随实现成本 & 另有内层线性化与求解误差 & 集合子空间限制、采样与仿射近似误差 & 与相同集合的 4DEnVar 一致；解析性仅针对二次近似\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+对二维 SWE，核心实现是：用非线性前向积分构造初值扰动与各时刻预测观测扰动之间的关系，
+使所有水位、流速观测共同约束 $(u_0,v_0,z_0)$。
+式~\eqref{eq:Je} 给出变分目标，式~\eqref{eq:analytical} 和~\eqref{eq:gain}
+给出同一二次目标的两种解析表示，式~\eqref{eq:outer} 给出需要进一步处理非线性时的更新。
+
+\end{document}
